@@ -1,0 +1,5 @@
+pytest>=8
+pypdf>=4
+pypdfium2>=4
+pillow>=10
+sympy>=1.12
