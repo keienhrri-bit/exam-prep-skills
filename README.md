@@ -151,7 +151,7 @@ npx skills add keienhrri-bit/kaoyan-study-skills
 2. **讲解给推导和依据。** 每一步说明凭什么成立，不用“显然可得”跳过关键环节。
 3. **讲过不等于会。** 学习证据只记五类：独立首答、提示后作答、订正后独立复做、仅阅读解析、听讲讨论。听懂了、看过解析，都不登记为掌握。
 4. **照片不进主会话。** 答卷照片交给转录者，主会话只读文字稿；看不清的地方先问本人，不猜着判。
-5. **外援的文字不进成稿。** 子代理和其他模型只交转录稿、问题清单和独立算出的数字；给你看的成稿由主会话写。
+5. **外援的文字不进成稿。** 转录者、复判者和其他模型只交转录稿、问题清单和独立算出的数字；给你看的成稿由主会话写。唯一的例外是约 5000 字以上、不需要新推导的长讲义或手册：主会话备好大纲、底稿和核过的数字，交 `writer` 子代理照着写，写完主会话核数字、查〔待核〕、看版面机检再交付。不想要这个例外，把 `kaoyan.yaml` 的 `roles.long_writer` 设成 `main`。
 6. **一份成稿只审一次。** 复判和审稿都只做一次，复判者看不到主会话的分数。
 7. **数字用脚本核，不靠再问一个模型。** 答案用 SymPy 重算；资料包里“讲义原话”用脚本回讲义逐字查；报告里同一个数全文一致。
 8. **计划给选项，不替你定。** 涉及时间分配的地方写成“推荐 / 另一种”；计划没完成只照实记，不催。
@@ -196,7 +196,7 @@ npx skills add keienhrri-bit/kaoyan-study-skills
 uv run skills/kaoyan-report/scripts/build_report.py examples/synthetic-mechanics/report.md out/report.pdf "斜面—碰撞综合题答卷分析" "合成示例" examples/synthetic-mechanics/figs.py --strict
 ```
 
-最后一行是版面机检结果：`unrendered_math`、`blank_pages`、`overflow` 都为空就算合格。构建目录是输出 PDF 旁边的 `_build/`，浏览器的临时配置目录构建完自动删掉。
+最后一行是版面机检结果：`unrendered_math`、`blank_pages`、`overflow`、`missing_images` 都为空就算合格。构建目录是输出 PDF 旁边的 `_build/`；每次构建的浏览器临时配置放在其中单独的子目录里，构建完自动删掉。
 
 ---
 

@@ -8,7 +8,7 @@
   uv run build_report.py <正文.md> <输出.pdf> "<页眉标题>" "<日期>" [图模块.py] [--json] [--strict]
 
   --json     机检结果按 JSON 打印（默认打印 Python 字典）
-  --strict   unrendered_math、blank_pages、overflow 任一非空时退出码为 1
+  --strict   unrendered_math、blank_pages、overflow、missing_images 任一非空时退出码为 1
   --author   写进 PDF 元数据的作者，默认空
   --chrome   浏览器路径；也可以用环境变量 KAOYAN_CHROME
 
@@ -17,10 +17,14 @@
   unrendered_math  PDF 文字里残留的 $ 或 \\命令（公式没渲染出来）
   blank_pages      几乎没字也没图的页
   overflow         宽过版心（180 mm）被裁掉的公式、表格、图，给前 40 字
+  missing_images   没加载出来的图片（路径写错、文件不在）
   sparse_pages     最后一页以外、内容不到三成的页（通常是大表格或图整块挤到下一页）
   sheet            全部页拼成的一张缩略图，要肉眼看时只看这一张
 
-正文里能用的写法见同目录上一级的 SKILL.md。构建目录是输出 PDF 旁边的 _build/。
+正文里能用的写法见同目录上一级的 SKILL.md。构建目录是输出 PDF 旁边的 _build/；
+每次构建的浏览器配置和中间文件放在其中一个单独的 run-* 子目录里，构建完删掉，
+所以同一个输出目录里并行构建不同文件名的报告不会互相干扰。
+正文里图片的相对路径按 Markdown 源文件所在目录解析。
 """
 from __future__ import annotations
 
@@ -34,8 +38,10 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
+from urllib.parse import unquote
 
 HERE = Path(__file__).resolve().parent
 ASSETS = HERE.parent / "assets"
@@ -45,12 +51,41 @@ PANDOC_FROM = "markdown+pipe_tables+tex_math_dollars+raw_html+fenced_divs"
 
 # ---------- 纯函数（有单测） ----------
 
+_PIPE_TOKEN = re.compile(r"\\\\|\\\||\|")  # 依次匹配：\\（换行，原样保留）、\|（双竖线）、|（单竖线）
+
+
 def fix_math_pipes(md: str) -> str:
-    """表格里公式中的 | 会被 pandoc 当成列分隔符，换成 \\vert。"""
+    """表格里公式中的 | 会被 pandoc 当成列分隔符：单竖线 | 换成 \\vert，双竖线 \\| 换成 \\Vert。
+    记号不变，只是不再出现裸的 | 字符。"""
+    def tok(t: re.Match) -> str:
+        s = t.group(0)
+        return s if s == "\\\\" else (r"\Vert " if s == r"\|" else r"\vert ")
+
     def sub(m: re.Match) -> str:
-        return m.group(0).replace(r"\|", r"\vert ").replace("|", r"\vert ")
+        return _PIPE_TOKEN.sub(tok, m.group(0))
     md = re.sub(r"\$\$.+?\$\$", sub, md, flags=re.S)
     return re.sub(r"(?<!\$)\$(?!\$)[^$\n]+?\$", sub, md)
+
+
+_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+_IMG_SRC = re.compile(r'(<img\b[^>]*?\bsrc=")([^"]*)(")', re.I)
+
+
+def rebase_images(html: str, base: Path) -> str:
+    """把 <img src="相对路径"> 改成按 Markdown 源文件目录解析出的 file:// 绝对地址。
+    HTML 放在 _build/ 里打印，不改的话浏览器会到 _build/ 下找图。已有协议（http:、data: 等）的不动。"""
+    def sub(m: re.Match) -> str:
+        v = _html.unescape(m.group(2))
+        if not v or v.startswith(("#", "//")):
+            return m.group(0)
+        if re.match(r"^[A-Za-z]:[\\/]", v) or v.startswith("/"):
+            p = Path(unquote(v))
+        elif _SCHEME.match(v):
+            return m.group(0)
+        else:
+            p = base / unquote(v.split("#", 1)[0].split("?", 1)[0])
+        return m.group(1) + _html.escape(p.resolve().as_uri()) + m.group(3)
+    return _IMG_SRC.sub(sub, html)
 
 
 def inject_figs(html: str, figs: dict) -> str:
@@ -63,9 +98,15 @@ def inject_figs(html: str, figs: dict) -> str:
     return re.sub(r"<!--FIG:(\w+)-->", sub, html)
 
 
+def css_string(s: str) -> str:
+    """转成可以放进 <style> 里 CSS 双引号字符串的内容：引号、反斜杠、尖括号、& 和控制字符
+    都写成 CSS 十六进制转义（如 \\3c ），这样标题里的 </style> 关不掉样式块，换行也不会弄坏页眉。"""
+    return "".join(f"\\{ord(c):x} " if (c in '"\'\\<>&' or ord(c) < 0x20 or ord(c) == 0x7f) else c for c in s)
+
+
 def fill_template(tpl: str, title: str, date: str, body: str) -> str:
     esc_title, esc_date = _html.escape(title), _html.escape(date)
-    css_title, css_date = title.replace('"', r"\""), date.replace('"', r"\"")
+    css_title, css_date = css_string(title), css_string(date)
     return (tpl.replace("{{TITLE_CSS}}", css_title).replace("{{DATE_CSS}}", css_date)
                .replace("{{TITLE}}", esc_title).replace("{{DATE}}", esc_date).replace("<!--BODY-->", body))
 
@@ -98,9 +139,9 @@ def find_chrome(explicit: str | None = None) -> str:
     raise FileNotFoundError("找不到 Chrome / Edge / Chromium。装一个，或用 --chrome、环境变量 KAOYAN_CHROME 指定路径。")
 
 
-def chrome_flags(build: Path) -> list[str]:
+def chrome_flags(profile: Path) -> list[str]:
     flags = ["--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
-             f"--user-data-dir={build / 'chrome-profile'}", "--virtual-time-budget=20000"]
+             f"--user-data-dir={profile}", "--virtual-time-budget=20000"]
     # GitHub Actions 等 Linux CI 上，Chrome 的沙箱常因用户命名空间受限而起不来
     if platform.system() == "Linux" and os.environ.get("CI"):
         flags.append("--no-sandbox")
@@ -177,24 +218,29 @@ def scan_pages(pdf: Path, title: str, date: str, build: Path) -> dict:
 
 PROBE_JS = (
     "<style>html,body{width:180mm!important;max-width:180mm!important;margin:0!important;padding:0!important}</style>"
-    "<script>window.addEventListener('load',function(){setTimeout(function(){var R=document.body.getBoundingClientRect().right+1,o=[];"
+    "<script>window.addEventListener('load',function(){setTimeout(function(){var R=document.body.getBoundingClientRect().right+1,o=[],g=[];"
     "document.querySelectorAll('.katex-display,table,pre,img,svg,.tiles,.ch,.flow,div').forEach(function(e){"
     "if(e.closest('.katex-display')&&!e.classList.contains('katex-display'))return;"
     "var r=e.getBoundingClientRect();if(e.scrollWidth>e.clientWidth+2||r.right>R){o.push((e.innerText||e.tagName).replace(/\\s+/g,' ').slice(0,40))}});"
-    "var p=document.createElement('pre');p.id='__ovf';p.textContent=JSON.stringify(o.slice(0,10));document.body.appendChild(p)},300)})</script>"
+    "Array.prototype.forEach.call(document.images,function(i){if(!i.complete||!i.naturalWidth){g.push(i.getAttribute('src')||'')}});"
+    "var p=document.createElement('pre');p.id='__ovf';p.textContent=JSON.stringify({o:o.slice(0,10),g:g.slice(0,10)});document.body.appendChild(p)},300)})</script>"
 )
 
 
-def probe_overflow(chrome: str, page: Path, build: Path) -> list[str]:
-    probe = build / f"{page.stem}_probe.html"
+def probe_page(chrome: str, page: Path, profile: Path) -> tuple[list[str], list[str]]:
+    """在 180 mm 宽的页面里找溢出版心的元素和没加载出来的图片。返回 (overflow, missing_images)。"""
+    probe = page.with_name(f"{page.stem}_probe.html")
     probe.write_text(page.read_text(encoding="utf-8").replace("</head>", PROBE_JS + "</head>"), encoding="utf-8")
     try:
-        dom = subprocess.run([chrome, *chrome_flags(build), "--window-size=700,1000", "--dump-dom", probe.as_uri()],
+        dom = subprocess.run([chrome, *chrome_flags(profile), "--window-size=700,1000", "--dump-dom", probe.as_uri()],
                              capture_output=True, text=True, encoding="utf-8", timeout=300).stdout
         m = re.search(r'<pre id="__ovf">(.*?)</pre>', dom, re.S)
-        return json.loads(_html.unescape(m.group(1))) if m else ["机检没跑成"]
+        if not m:
+            return ["机检没跑成"], []
+        d = json.loads(_html.unescape(m.group(1)))
+        return d["o"], [unquote(s) for s in d["g"]]
     except Exception as e:  # noqa: BLE001
-        return [f"机检没跑成：{e}"]
+        return [f"机检没跑成：{e}"], []
     finally:
         probe.unlink(missing_ok=True)
 
@@ -207,6 +253,7 @@ def build(src: Path, out: Path, title: str, date: str, figmod: Path | None = Non
 
     chrome = find_chrome(chrome)
     body = inject_figs(md_to_html(src.read_text(encoding="utf-8")), load_figs(figmod))
+    body = rebase_images(body, src.parent)
 
     bdir = out.parent / "_build"
     bdir.mkdir(parents=True, exist_ok=True)
@@ -217,9 +264,11 @@ def build(src: Path, out: Path, title: str, date: str, figmod: Path | None = Non
     page = bdir / f"{out.stem}.html"
     page.write_text(fill_template((ASSETS / "template.html").read_text(encoding="utf-8"), title, date, body), encoding="utf-8")
 
-    raw = bdir / "_raw.pdf"
+    # 这次构建独占的目录：浏览器配置和中间 PDF 都放这里，结束整个删掉
+    run = Path(tempfile.mkdtemp(prefix="run-", dir=bdir))
+    profile, raw = run / "chrome-profile", run / "raw.pdf"
     try:
-        subprocess.run([chrome, *chrome_flags(bdir), "--no-pdf-header-footer", "--run-all-compositor-stages-before-draw",
+        subprocess.run([chrome, *chrome_flags(profile), "--no-pdf-header-footer", "--run-all-compositor-stages-before-draw",
                         f"--print-to-pdf={raw}", page.as_uri()], check=True, timeout=300, capture_output=True)
         w = PdfWriter(clone_from=PdfReader(str(raw)))
         # Creator 默认是浏览器的 User-Agent（带操作系统和版本），换成固定写法
@@ -228,11 +277,11 @@ def build(src: Path, out: Path, title: str, date: str, figmod: Path | None = Non
         out.parent.mkdir(parents=True, exist_ok=True)
         with out.open("wb") as f:
             w.write(f)
-        raw.unlink()
-        result = {"file": out.name, **scan_pages(out, title, date, bdir), "overflow": probe_overflow(chrome, page, bdir)}
+        overflow, missing = probe_page(chrome, page, profile)
+        result = {"file": out.name, **scan_pages(out, title, date, bdir), "overflow": overflow, "missing_images": missing}
     finally:
-        remove_profile(bdir / "chrome-profile")
-    order =("file", "pages", "unrendered_math", "blank_pages", "overflow", "sparse_pages", "sheet")
+        remove_profile(run)
+    order = ("file", "pages", "unrendered_math", "blank_pages", "overflow", "missing_images", "sparse_pages", "sheet")
     return {k: result[k] for k in order}
 
 
@@ -253,7 +302,7 @@ def main(argv: list[str] | None = None) -> int:
     res = build(a.src.resolve(), a.out.resolve(), a.title, a.date,
                 a.figmod.resolve() if a.figmod else None, a.chrome, a.author)
     print(json.dumps(res, ensure_ascii=False) if a.json else res)
-    bad = res["unrendered_math"] or res["blank_pages"] or res["overflow"]
+    bad = res["unrendered_math"] or res["blank_pages"] or res["overflow"] or res["missing_images"]
     return 1 if (a.strict and bad) else 0
 
 

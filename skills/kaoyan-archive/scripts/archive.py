@@ -12,8 +12,11 @@
 
 2. 执行：
    python archive.py apply plan.json [--log 99_整理记录/学习记录归档日志.md] [--dry-run]
-   只移动 action 为 move 的项；移动前确认源文件还在、内容没变、目标在工作区里且没有同名文件。
+   只移动 action 为 move 的项；移动前确认源文件还在收件夹里、不是符号链接、内容没变，
+   目标在工作区里且没有同名文件。日志路径也必须在工作区里，否则一个文件都不动。
    duplicate、pending、classify 都留在原处，不删除。最后在日志末尾追加一节。
+
+收件夹里的符号链接不进方案：移动它等于移动链接指向的别处的文件。
 """
 from __future__ import annotations
 
@@ -49,7 +52,7 @@ def walk(root: Path, exts: tuple[str, ...]):
 
 def scan(inbox: Path, workspace: Path, days: float, exts: tuple[str, ...], now: float | None = None) -> dict:
     now = now or time.time()
-    recent = sorted((p for p in inbox.iterdir() if p.is_file() and p.suffix.lower() in exts
+    recent = sorted((p for p in inbox.iterdir() if p.is_file() and not p.is_symlink() and p.suffix.lower() in exts
                      and now - p.stat().st_mtime <= days * 86400), key=lambda p: p.stat().st_mtime)
     sizes = {p.stat().st_size for p in recent}
     index: dict[str, str] = {}
@@ -62,7 +65,7 @@ def scan(inbox: Path, workspace: Path, days: float, exts: tuple[str, ...], now: 
     for p in recent:
         digest = sha256(p)
         dup = index.get(digest)
-        items.append({"src": str(p.resolve()), "name": p.name, "size": p.stat().st_size,
+        items.append({"src": str(inbox_r / p.name), "name": p.name, "size": p.stat().st_size,
                       "mtime": datetime.fromtimestamp(p.stat().st_mtime).isoformat(timespec="seconds"),
                       "sha256": digest, "action": "duplicate" if dup else "classify", "dup_of": dup,
                       "subject": None, "stage": None, "dest": None, "note": ""})
@@ -80,6 +83,12 @@ def inside(child: Path, parent: Path) -> bool:
 
 def apply(plan: dict, log_rel: str | None, dry_run: bool = False) -> dict:
     ws = Path(plan["workspace"])
+    inbox_r = Path(plan["inbox"]).resolve()
+    log = None
+    if log_rel:
+        log = Path(log_rel) if Path(log_rel).is_absolute() else ws / log_rel
+        if not inside(log, ws) or log.is_symlink():
+            raise ValueError(f"日志路径不在工作区里：{log_rel}。没有移动任何文件。")
     moved, skipped, left = [], [], []
     for it in plan["items"]:
         src = Path(it["src"])
@@ -93,8 +102,12 @@ def apply(plan: dict, log_rel: str | None, dry_run: bool = False) -> dict:
         target = dest_dir / src.name
         if not inside(dest_dir, ws):
             skipped.append((it, "目标不在工作区里"))
+        elif src.is_symlink():
+            skipped.append((it, "源文件是符号链接，不移动"))
         elif not src.exists():
             skipped.append((it, "源文件已不在"))
+        elif src.parent.resolve() != inbox_r:
+            skipped.append((it, "源文件不在收件夹里"))
         elif sha256(src) != it["sha256"]:
             skipped.append((it, "源文件出方案后被改过，重新出方案"))
         elif target.exists():
@@ -104,8 +117,7 @@ def apply(plan: dict, log_rel: str | None, dry_run: bool = False) -> dict:
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(src), str(target))
             moved.append((it, target.relative_to(ws).as_posix()))
-    if log_rel and not dry_run and (moved or skipped or left):
-        log = ws / log_rel
+    if log and not dry_run and (moved or skipped or left):
         log.parent.mkdir(parents=True, exist_ok=True)
         lines = [f"\n## {datetime.now():%Y-%m-%d %H:%M}\n",
                  f"移动 {len(moved)}，跳过 {len(skipped)}，留在原处 {len(left)}。\n"]
@@ -149,7 +161,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     plan = json.loads(a.plan.read_text(encoding="utf-8"))
-    res = apply(plan, a.log, a.dry_run)
+    try:
+        res = apply(plan, a.log, a.dry_run)
+    except ValueError as e:
+        print(e)
+        return 2
     tag = "（演练，未移动）" if a.dry_run else ""
     for it, dst in res["moved"]:
         print(f"移动{tag}  {it['name']} → {dst}")

@@ -9,6 +9,8 @@
   python init_workspace.py <目标目录> --subject ... [--dry-run]
 
 打印一张清单：每个路径是“新建”还是“已存在，跳过”。
+工作区里已有的目录如果是指向别处的链接（符号链接、Windows 目录联接），不往里写，
+打印“链接指向工作区外，跳过”，最后退出码 2。
 """
 from __future__ import annotations
 
@@ -36,6 +38,20 @@ def plan(dest: Path, subjects: list[str]) -> list[tuple[Path, Path]]:
     return pairs
 
 
+def escapes(dst: Path, root: Path) -> bool:
+    """dst 本身是链接，或者它最近的已存在的上级目录解析后不在 root 里，就算越界。
+    工作区还没建时，最近的已存在目录是 root 的上级，下面全是新建的，不算越界。"""
+    if dst.is_symlink():
+        return True
+    p = dst.parent
+    while not p.exists() and p != p.parent:
+        if p.is_symlink():  # 指向不存在目标的链接
+            return True
+        p = p.parent
+    pr = p.resolve()
+    return not (pr == root or root in pr.parents or pr in root.parents)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="建备考工作区")
     ap.add_argument("dest", type=Path)
@@ -49,8 +65,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"科目文件夹名不合法：{bad}")
         return 2
     dest = a.dest.expanduser().resolve()
-    made = skipped = 0
+    made = skipped = refused = 0
     for src, dst in plan(dest, a.subject):
+        if escapes(dst, dest):
+            print(f"链接指向工作区外，跳过  {dst.relative_to(dest)}")
+            refused += 1
+            continue
         if dst.exists():
             print(f"已存在，跳过  {dst.relative_to(dest)}")
             skipped += 1
@@ -60,8 +80,9 @@ def main(argv: list[str] | None = None) -> int:
         if not a.dry_run:
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
-    print(f"合计：新建 {made}，跳过 {skipped}{'（演练，未写入）' if a.dry_run else ''}")
-    return 0
+    print(f"合计：新建 {made}，跳过 {skipped}" + (f"，越界没写 {refused}" if refused else "")
+          + ("（演练，未写入）" if a.dry_run else ""))
+    return 2 if refused else 0
 
 
 if __name__ == "__main__":

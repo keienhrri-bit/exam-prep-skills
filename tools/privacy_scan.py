@@ -5,8 +5,10 @@
 
 - 仓库里只放通用规则。个人的词（真实姓名、用户名、院校、科目代码等）写在一个**不提交**的文件里，
   每行一个正则，用 --extra 传入；默认会读 .work/privacy-extra.txt（.work/ 已在 .gitignore 里）。
-- 文本文件逐行查；PDF、PNG 等二进制文件查原始字节里的路径和邮箱，PDF 另外抽文字和元数据再查一遍。
-- 有命中时退出码 1。
+- 文本文件逐行查全部规则。扩展名不在已知列表里的文件，只要能按 UTF-8 解码、没有 NUL 字节，也按文本查。
+  PDF、PNG 等二进制文件查原始字节里的路径和邮箱，PDF 另外抽文字和元数据再查一遍。
+- 有命中时退出码 1。扫描目录不存在、一个文件都没扫到、--extra 指定的词表不存在、
+  git 仓库里读不出提交作者时退出码 2：没查完不算通过。
 """
 from __future__ import annotations
 
@@ -17,7 +19,11 @@ import sys
 from pathlib import Path
 
 SKIP_DIRS = {".git", ".work", "_build", "node_modules", ".venv", "__pycache__", ".pytest_cache"}
-TEXT_EXT = {".md", ".txt", ".py", ".json", ".yaml", ".yml", ".css", ".html", ".js", ".csv", ".svg", ".toml", ".cfg", ".ini", ""}
+TEXT_EXT = {".md", ".txt", ".py", ".json", ".yaml", ".yml", ".css", ".html", ".js", ".csv", ".svg", ".toml", ".cfg", ".ini", "",
+            ".sh", ".bash", ".zsh", ".ps1", ".psm1", ".bat", ".cmd", ".ts", ".tsx", ".mjs", ".cjs", ".xml", ".env",
+            ".tex", ".bib", ".r", ".sql", ".rb", ".go", ".rs", ".java", ".c", ".h", ".cpp", ".lua", ".php", ".ipynb"}
+BINARY_EXT = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp", ".woff2", ".woff", ".ttf", ".otf",
+              ".zip", ".gz", ".7z", ".tar", ".exe", ".dll", ".so", ".dylib", ".pyc"}
 VENDORED = ("skills/kaoyan-report/assets/katex/",)
 ALLOWED_EMAIL = re.compile(r"@(users\.noreply\.github\.com|example\.(com|org))$", re.I)
 
@@ -52,6 +58,21 @@ def load_extra(paths: list[Path]) -> list[tuple[str, re.Pattern]]:
                 if line.strip() and not line.startswith("#"):
                     rules.append(("私有词表", re.compile(line.strip(), re.I)))
     return rules
+
+
+def decode_text(p: Path, data: bytes) -> str | None:
+    """按文本查就返回解码后的字符串，按二进制查返回 None。"""
+    suf = p.suffix.lower()
+    if suf in BINARY_EXT:
+        return None
+    if suf in TEXT_EXT:
+        return data.decode("utf-8", errors="replace")
+    if b"\x00" in data[:8192]:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
 def files(root: Path):
@@ -91,19 +112,29 @@ def scan_binary(rel: str, data: bytes, extra) -> list[str]:
     return hits
 
 
-def git_authors(root: Path) -> list[str]:
+def git_authors(root: Path) -> tuple[list[str], str | None, bool]:
+    """返回 (可疑的提交作者, 说明, 是否没查成)。不是 git 仓库或还没有提交时只给说明，不算失败。"""
+    def git(*args):
+        return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, encoding="utf-8")
     try:
-        out = subprocess.run(["git", "-C", str(root), "log", "--format=%an <%ae>|%cn <%ce>"],
-                             capture_output=True, text=True, encoding="utf-8", check=True).stdout
-    except Exception:  # noqa: BLE001
-        return []
+        inside = git("rev-parse", "--is-inside-work-tree")
+    except FileNotFoundError:
+        return [], "没找到 git，没查提交作者", False
+    if inside.returncode != 0:
+        return [], "不是 git 仓库，没查提交作者", False
+    if git("rev-parse", "--verify", "-q", "HEAD").returncode != 0:
+        return [], "还没有提交，没查提交作者", False
+    r = git("log", "--format=%an <%ae>|%cn <%ce>")
+    if r.returncode != 0:
+        return [], f"git log 没跑成：{(r.stderr or '').strip()[:200]}", True
+    out = r.stdout
     bad = set()
     for line in out.splitlines():
         for who in line.split("|"):
             email = who[who.find("<") + 1:who.rfind(">")]
             if email and not ALLOWED_EMAIL.search(email) and email != "noreply@github.com":
                 bad.add(who)
-    return [f"git 提交作者  {w}" for w in sorted(bad)]
+    return [f"git 提交作者  {w}" for w in sorted(bad)], None, False
 
 
 rel_root = Path(".")
@@ -118,6 +149,13 @@ def main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     root = rel_root = a.root.resolve()
+    if not root.is_dir():
+        print(f"扫描目录不存在或不是目录：{a.root}。没有扫描，不算通过。")
+        return 2
+    missing = [p for p in a.extra if not p.is_file()]
+    if missing:
+        print(f"--extra 指定的词表不存在：{', '.join(map(str, missing))}。没有扫描，不算通过。")
+        return 2
     extra = load_extra(a.extra + [root / ".work" / "privacy-extra.txt"])
     me = Path(__file__).resolve()
     hits, n = [], 0
@@ -126,22 +164,31 @@ def main(argv: list[str] | None = None) -> int:
             continue
         n += 1
         rel = p.relative_to(root).as_posix()
-        if p.suffix.lower() in TEXT_EXT:
+        data = p.read_bytes()
+        text = decode_text(p, data)
+        if text is not None:
             # 第三方原样打包的文件（KaTeX）只查通用规则；私有词表里的数字会在压缩代码里误报
             rules = RULES if rel.startswith(VENDORED) else RULES + extra
-            hits += scan_text(rel, p.read_text(encoding="utf-8", errors="replace"), rules)
+            hits += scan_text(rel, text, rules)
         else:
-            data = p.read_bytes()
             hits += scan_binary(rel, data, extra)
             # 压缩过的 PDF、图片、字体里按私有词表搜原始字节只会误报；PDF 已在上面抽文字查过
-            if p.suffix.lower() not in {".pdf", ".png", ".jpg", ".jpeg", ".woff2", ".woff", ".ttf", ".zip"}:
+            if p.suffix.lower() not in BINARY_EXT:
                 for name, rx in extra:
                     if rx.search(data.decode("latin-1")):
                         hits.append(f"{rel}  私有词表（二进制）  {rx.pattern}")
-    hits += git_authors(root)
+    authors, note, git_failed = git_authors(root)
+    hits += authors
     print(f"扫描 {n} 个文件，私有词表 {len(extra)} 条，命中 {len(hits)} 处")
     for h in hits:
         print("  " + h)
+    if note:
+        print(f"  说明：{note}")
+    if n == 0:
+        print("一个文件都没扫到，不算通过。")
+        return 2
+    if git_failed:
+        return 2
     return 1 if hits else 0
 
 

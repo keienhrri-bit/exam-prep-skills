@@ -23,13 +23,20 @@ from pathlib import Path
 
 PUNCT = str.maketrans({"，": ",", "。": ".", "；": ";", "：": ":", "？": "?", "！": "!", "（": "(", "）": ")",
                        "“": '"', "”": '"', "‘": "'", "’": "'", "「": '"', "」": '"', "、": ",", "—": "-", "－": "-"})
-LIST_MARK = re.compile(r"^(\s*(?:[-*+]|\d+[.、)]|[（(]\d+[）)])\s*)")
+# “- ”“1. ”“1) ”后面必须有空白，免得把“1.5 倍”“-1”的开头当成列表符号；“1、”“（1）”可以不带空白
+LIST_MARK = re.compile(r"^(\s*(?:(?:[-*+]|\d+[.)])\s+|\d+、\s*|[（(]\d+[）)]\s*))")
 OLD_TAG = re.compile(r"^【(?:讲义原话|转述)】\s*")
+SEP = "\x00"  # 讲义文件之间的分隔符；句子规范化后不会含它，所以匹配不会跨文件
 
 
 def norm(s: str) -> str:
     s = unicodedata.normalize("NFKC", s).translate(PUNCT)
     return re.sub(r"\s+", "", s)
+
+
+def build_corpus(texts: list[str]) -> str:
+    """每份讲义各自规范化，用 SEP 隔开，一句话只能在某一份讲义里整句命中。"""
+    return SEP.join(norm(t) for t in texts)
 
 
 def tag_line(line: str, corpus: str) -> tuple[str, bool]:
@@ -47,7 +54,7 @@ def nearest(body: str, raw_corpus: str) -> str:
     sm = difflib.SequenceMatcher(None, raw_corpus, n, autojunk=False)
     m = sm.find_longest_match(0, len(raw_corpus), 0, len(n))
     a = max(m.a - 30, 0)
-    return raw_corpus[a:m.a + m.size + 30]
+    return raw_corpus[a:m.a + m.size + 30].replace(SEP, " ‖ ")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -58,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    corpus = norm("".join(p.read_text(encoding="utf-8") for p in a.lecture))
+    corpus = build_corpus([p.read_text(encoding="utf-8") for p in a.lecture])
     out, misses = [], []
     for line in a.sentences.read_text(encoding="utf-8").splitlines():
         if not line.strip():

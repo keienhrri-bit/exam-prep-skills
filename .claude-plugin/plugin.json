@@ -1,7 +1,7 @@
 {
   "name": "kaoyan-study-skills",
   "displayName": "考研备考 skills",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A long-haul exam-prep workflow for Claude Code and Codex: tutor that makes you try first, a verifiable grading pipeline (photo → transcript → human check → rubric grading → one independent regrade), checkpoint reviews, study-log archiving, daily packs and a fixed PDF report pipeline. Chinese-first.",
   "author": {
     "name": "keienhrri-bit",

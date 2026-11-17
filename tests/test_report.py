@@ -14,9 +14,14 @@ charts = load("skills/kaoyan-report/scripts/charts.py", "charts")
 def test_fix_math_pipes_inside_table_math():
     md = "| a | $|x|$ |\n|---|---|\n| b | $$\\|v\\|$$ |"
     out = br.fix_math_pipes(md)
-    assert "$\\vert x\\vert $" in out
-    assert "\\vert v\\vert" in out
+    assert "$\\vert x\\vert $" in out          # 绝对值：单竖线
+    assert "$$\\Vert v\\Vert $$" in out        # 范数：双竖线，不能变成单竖线
     assert "|" not in out.split("$")[1]
+
+
+def test_fix_math_pipes_keeps_latex_newline():
+    # \\ 是换行，后面的 | 是单竖线；不能把第二个反斜杠和 | 拼成 \|
+    assert br.fix_math_pipes(r"$$a \\|b|$$") == r"$$a \\\vert b\vert $$"
 
 
 def test_fix_math_pipes_leaves_plain_text():
@@ -35,8 +40,31 @@ def test_fill_template_escapes_title_and_keeps_body():
     tpl = "<title>{{TITLE}}</title>@{{TITLE_CSS}}@{{DATE_CSS}}<!--BODY-->{{DATE}}"
     out = br.fill_template(tpl, 'A<B "c"', "2026-01-01", "<p>{{DATE}}</p>")
     assert "<title>A&lt;B &quot;c&quot;</title>" in out
-    assert '@A<B \\"c\\"@' in out
+    assert "@A\\3c B \\22 c\\22 @" in out
     assert out.endswith("<p>{{DATE}}</p>2026-01-01")  # 正文里的占位符不被替换
+
+
+def test_title_cannot_break_out_of_style():
+    tpl = (br.ASSETS / "template.html").read_text(encoding="utf-8")
+    evil = '</style><script>alert(1)</script><style>\\\n"'
+    out = br.fill_template(tpl, evil, evil, "<p>x</p>")
+    head = out.split("<body>")[0]
+    style = head[head.index("<style>"):head.index("</style>") + len("</style>")]
+    assert "<script" not in style and "\n\"" not in style
+    assert head.count("</style>") == tpl.split("<body>")[0].count("</style>")
+    assert head.count("<script") == tpl.split("<body>")[0].count("<script")
+
+
+def test_rebase_images_resolves_against_source_dir(tmp_path):
+    html = ('<p><img src="figs/a%20b.png" alt="x" /><img src="https://e.org/p.png" />'
+            '<img src="data:image/png;base64,AA" /></p>')
+    out = br.rebase_images(html, tmp_path / "notes")
+    assert f'src="{(tmp_path / "notes" / "figs" / "a b.png").resolve().as_uri()}"' in out
+    assert 'src="https://e.org/p.png"' in out and 'src="data:image/png;base64,AA"' in out
+
+
+def test_chrome_flags_use_given_profile(tmp_path):
+    assert f"--user-data-dir={tmp_path / 'p'}" in br.chrome_flags(tmp_path / "p")
 
 
 def test_leftover_math():
@@ -60,7 +88,7 @@ def test_find_chrome_respects_env(tmp_path, monkeypatch):
     assert br.find_chrome() == str(fake)
 
 
-def test_build_example_end_to_end(tmp_path):
+def _need_browser():
     need_tools("pandoc")
     try:
         br.find_chrome()
@@ -68,11 +96,42 @@ def test_build_example_end_to_end(tmp_path):
         if os.environ.get("KAOYAN_REQUIRE_E2E"):
             raise
         pytest.skip("没有 Chrome / Edge / Chromium")
+
+
+def _no_leftovers(bdir):
+    left = [p.name for p in bdir.iterdir() if p.name.startswith(("run-", "chrome-profile", "_raw"))]
+    assert left == [], f"构建目录里留下了浏览器配置或中间文件：{left}"
+
+
+def test_build_example_end_to_end(tmp_path):
+    _need_browser()
     ex = ROOT / "examples" / "synthetic-mechanics"
     res = br.build(ex / "report.md", tmp_path / "report.pdf", "合成示例", "测试", ex / "figs.py")
     print(json.dumps(res, ensure_ascii=False))
     assert res["pages"] >= 1
     assert res["unrendered_math"] == []
     assert res["blank_pages"] == []
+    assert res["missing_images"] == []
     assert (tmp_path / "report.pdf").stat().st_size > 10_000
-    assert not (tmp_path / "_build" / "chrome-profile").exists(), "浏览器配置目录应在构建后删掉"
+    _no_leftovers(tmp_path / "_build")
+
+
+def test_parallel_builds_with_relative_images(tmp_path):
+    """同一个输出目录里并行构建两份报告；相对路径的图片按源文件目录找，找不到的报到 missing_images。"""
+    _need_browser()
+    from PIL import Image
+    src = tmp_path / "notes"
+    (src / "figs").mkdir(parents=True)
+    Image.new("RGB", (40, 20), (200, 60, 60)).save(src / "figs" / "ok.png")
+    (src / "a.md").write_text("# 甲\n\n![图](figs/ok.png)\n\n$\\|v\\| = 1$\n", encoding="utf-8")
+    (src / "b.md").write_text("# 乙\n\n![图](figs/ok.png)\n\n![缺](figs/nope.png)\n", encoding="utf-8")
+    out = tmp_path / "out"
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(2) as ex:
+        fa = ex.submit(br.build, src / "a.md", out / "a.pdf", "甲", "测试")
+        fb = ex.submit(br.build, src / "b.md", out / "b.pdf", "乙", "测试")
+        ra, rb = fa.result(), fb.result()
+    assert ra["missing_images"] == [] and ra["unrendered_math"] == []
+    assert len(rb["missing_images"]) == 1 and rb["missing_images"][0].endswith("figs/nope.png")
+    assert (out / "a.pdf").exists() and (out / "b.pdf").exists()
+    _no_leftovers(out / "_build")

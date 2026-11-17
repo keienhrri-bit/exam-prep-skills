@@ -25,7 +25,7 @@ The screenshots come from the bundled synthetic example: an original mechanics p
 | `kaoyan-plan` | Checkpoint reviews and weekly plans: two different drafts, you choose |
 | `kaoyan-archive` | Files exported study chats into the right subject folder; plans first, moves after a spot check, never deletes |
 | `kaoyan-daily-pack` | A daily "read, then answer" pack plus a prompt for memorisation-heavy, multiple-choice subjects |
-| `kaoyan-report` | Markdown → pandoc → KaTeX → headless Chromium → PDF, with an automatic layout check (unrendered math, blank pages, overflow) |
+| `kaoyan-report` | Markdown → pandoc → KaTeX → headless Chromium → PDF, with an automatic layout check (unrendered math, blank pages, overflow, missing images) |
 | `kaoyan-retro` | After a mistake by the AI: root cause, one line in the lessons log, a minimal fix that you approve |
 | `physics-svg-tutor` | Teaches physics geometry with SVG diagrams; the case library focuses on optical interference |
 
@@ -63,7 +63,7 @@ Or via [skills.sh](https://skills.sh) (not tested by the author): `npx skills ad
 2. Explain with derivations and reasons, not bare conclusions.
 3. Hearing an explanation is not mastery; study evidence is logged in five kinds, from "answered alone first try" to "only listened".
 4. Answer photos never enter the main session; a transcriber turns them into text, and unclear spots go back to the student.
-5. Helpers return transcripts, issue lists and independently computed numbers; the main session writes everything the student reads.
+5. Helpers return transcripts, issue lists and independently computed numbers; the main session writes everything the student reads. One exception: long notes (roughly 5,000+ Chinese characters, no new derivations) can go to the `writer` subagent, which writes from the main session's outline and checked numbers; the main session then checks the numbers and the layout report. Set `roles.long_writer: main` in `kaoyan.yaml` to turn this off.
 6. Each deliverable is reviewed once. The regrader never sees the main session's scores.
 7. Numbers are checked by scripts (SymPy for answers, exact-match lookup for quoted lecture lines), not by asking another model.
 8. Plans are offered as options; the student decides.
