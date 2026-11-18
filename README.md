@@ -196,7 +196,7 @@ npx skills add keienhrri-bit/kaoyan-study-skills
 uv run skills/kaoyan-report/scripts/build_report.py examples/synthetic-mechanics/report.md out/report.pdf "斜面—碰撞综合题答卷分析" "合成示例" examples/synthetic-mechanics/figs.py --strict
 ```
 
-最后一行是版面机检结果：`unrendered_math`、`blank_pages`、`overflow`、`missing_images` 都为空就算合格。构建目录是输出 PDF 旁边的 `_build/`；每次构建的浏览器临时配置放在其中单独的子目录里，构建完自动删掉。
+最后一行是版面机检结果：`unrendered_math`、`blank_pages`、`overflow`、`missing_images` 都为空就算合格。每次构建在输出 PDF 旁边的 `_build/` 中独占一个子目录，保留 HTML、图片副本、样式和缩略图。浏览器临时配置和中间 PDF 会在构建结束时清理。
 
 ---
 

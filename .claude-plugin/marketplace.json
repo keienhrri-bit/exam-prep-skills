@@ -8,6 +8,7 @@
     {
       "name": "kaoyan-study-skills",
       "source": "./",
+      "version": "0.1.2",
       "description": "Nine skills and four subagents for months-long exam prep: tutor, grading pipeline, checkpoint review, archive, daily pack, PDF reports, retro, physics diagrams."
     }
   ]

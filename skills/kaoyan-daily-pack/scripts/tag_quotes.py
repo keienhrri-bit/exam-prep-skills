@@ -9,8 +9,8 @@
 用法：
   python tag_quotes.py --lecture 讲义1.md [讲义2.md …] --sentences 句子.md [--out 打标后.md]
 
-句子文件一行一句，可以带列表符号（“1. ”“- ”）。输出保持原来的列表符号，在句子前加标记。
-找不到的句子另外列出最像的一段讲义（前后 30 字），方便人工换成原话。
+句子文件一行一句，可以带列表符号（“1. ”“1)”“- ”）。输出保持原来的列表符号，在句子前加标记。
+标准错误输出会列出命中句的行号和第一份命中讲义，并给转述句附上最像的一段讲义（前后 30 字）。
 """
 from __future__ import annotations
 
@@ -23,10 +23,9 @@ from pathlib import Path
 
 PUNCT = str.maketrans({"，": ",", "。": ".", "；": ";", "：": ":", "？": "?", "！": "!", "（": "(", "）": ")",
                        "“": '"', "”": '"', "‘": "'", "’": "'", "「": '"', "」": '"', "、": ",", "—": "-", "－": "-"})
-# “- ”“1. ”“1) ”后面必须有空白，免得把“1.5 倍”“-1”的开头当成列表符号；“1、”“（1）”可以不带空白
-LIST_MARK = re.compile(r"^(\s*(?:(?:[-*+]|\d+[.)])\s+|\d+、\s*|[（(]\d+[）)]\s*))")
+# 正负号和数字加点后要求有空白，以保留行首的数值。“1)”“1、”“（1）”可以紧接正文。
+LIST_MARK = re.compile(r"^(\s*(?:(?:[-*+]|\d+\.)\s+|\d+[)、]\s*|[（(]\d+[）)]\s*))")
 OLD_TAG = re.compile(r"^【(?:讲义原话|转述)】\s*")
-SEP = "\x00"  # 讲义文件之间的分隔符；句子规范化后不会含它，所以匹配不会跨文件
 
 
 def norm(s: str) -> str:
@@ -34,27 +33,37 @@ def norm(s: str) -> str:
     return re.sub(r"\s+", "", s)
 
 
-def build_corpus(texts: list[str]) -> str:
-    """每份讲义各自规范化，用 SEP 隔开，一句话只能在某一份讲义里整句命中。"""
-    return SEP.join(norm(t) for t in texts)
+def build_corpus(texts: list[str]) -> list[str]:
+    """保留每份讲义的独立边界。"""
+    return [norm(text) for text in texts]
 
 
-def tag_line(line: str, corpus: str) -> tuple[str, bool]:
+def tag_with_source(line: str, corpus: list[str]) -> tuple[str, int | None]:
     m = LIST_MARK.match(line)
     prefix = m.group(1) if m else ""
     body = OLD_TAG.sub("", line[len(prefix):].strip())
-    found = bool(body) and norm(body) in corpus
-    return f"{prefix}{'【讲义原话】' if found else '【转述】'}{body}", found
+    normalized = norm(body)
+    source = next((i for i, lecture in enumerate(corpus) if normalized in lecture), None) if normalized else None
+    tag = "【讲义原话】" if source is not None else "【转述】"
+    return f"{prefix}{tag}{body}", source
 
 
-def nearest(body: str, raw_corpus: str) -> str:
-    n = norm(body)
-    if not n:
+def tag_line(line: str, corpus: str | list[str]) -> tuple[str, bool]:
+    tagged, source = tag_with_source(line, [corpus] if isinstance(corpus, str) else corpus)
+    return tagged, source is not None
+
+
+def nearest(body: str, corpus: list[str]) -> str:
+    normalized = norm(body)
+    if not normalized:
         return ""
-    sm = difflib.SequenceMatcher(None, raw_corpus, n, autojunk=False)
-    m = sm.find_longest_match(0, len(raw_corpus), 0, len(n))
-    a = max(m.a - 30, 0)
-    return raw_corpus[a:m.a + m.size + 30].replace(SEP, " ‖ ")
+    best_size, snippet = -1, ""
+    for lecture in corpus:
+        match = difflib.SequenceMatcher(None, lecture, normalized, autojunk=False).find_longest_match()
+        if match.size > best_size:
+            best_size = match.size
+            snippet = lecture[max(match.a - 30, 0):match.a + match.size + 30]
+    return snippet
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -66,15 +75,17 @@ def main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     corpus = build_corpus([p.read_text(encoding="utf-8") for p in a.lecture])
-    out, misses = [], []
-    for line in a.sentences.read_text(encoding="utf-8").splitlines():
+    out, sources, misses = [], [], []
+    for number, line in enumerate(a.sentences.read_text(encoding="utf-8").splitlines(), start=1):
         if not line.strip():
             out.append(line)
             continue
-        tagged, ok = tag_line(line, corpus)
+        tagged, source = tag_with_source(line, corpus)
         out.append(tagged)
-        if not ok:
+        if source is None:
             misses.append(tagged)
+        else:
+            sources.append((number, source))
     text = "\n".join(out) + "\n"
     if a.out:
         a.out.write_text(text, encoding="utf-8")
@@ -82,6 +93,8 @@ def main(argv: list[str] | None = None) -> int:
         print(text, end="")
     total = sum(1 for line in out if line.strip())
     print(f"\n合计 {total} 句：讲义原话 {total - len(misses)}，转述 {len(misses)}", file=sys.stderr)
+    for number, source in sources:
+        print(f"  第 {number} 行命中讲义 {source + 1}（{a.lecture[source].name}）", file=sys.stderr)
     for t in misses:
         body = OLD_TAG.sub("", LIST_MARK.sub("", t).strip())
         print(f"  转述：{body}\n    讲义里最像的一段：{nearest(body, corpus)}", file=sys.stderr)

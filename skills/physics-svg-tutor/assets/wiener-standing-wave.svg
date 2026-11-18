@@ -21,8 +21,8 @@
   <line x1="668" y1="246" x2="668" y2="286" stroke="#4e5c6d" stroke-width="2"/>
   <path d="M663 252 L668 246 L673 252 M663 280 L668 286 L673 280" fill="none" stroke="#4e5c6d" stroke-width="2"/>
   <text x="678" y="271" font-family="Noto Sans CJK SC, sans-serif" font-size="17" fill="#4e5c6d">λ/2</text>
-  <line x1="668" y1="290" x2="668" y2="306" stroke="#4e5c6d" stroke-width="2"/>
-  <path d="M664 295 L668 290 L672 295" fill="none" stroke="#4e5c6d" stroke-width="2"/>
+  <line x1="668" y1="286" x2="668" y2="306" stroke="#4e5c6d" stroke-width="2"/>
+  <path d="M664 291 L668 286 L672 291" fill="none" stroke="#4e5c6d" stroke-width="2"/>
   <text x="678" y="303" font-family="Noto Sans CJK SC, sans-serif" font-size="15" fill="#4e5c6d">λ/4</text>
   <path d="M135 306 A45 45 0 0 0 133 292.8" stroke="#b17b3c" stroke-width="2" fill="none"/>
   <text x="166" y="303" font-family="Noto Sans CJK SC, sans-serif" font-size="21" fill="#b17b3c">θ</text>

@@ -39,17 +39,15 @@ def plan(dest: Path, subjects: list[str]) -> list[tuple[Path, Path]]:
 
 
 def escapes(dst: Path, root: Path) -> bool:
-    """dst 本身是链接，或者它最近的已存在的上级目录解析后不在 root 里，就算越界。
-    工作区还没建时，最近的已存在目录是 root 的上级，下面全是新建的，不算越界。"""
+    """检查目标链接及 root 内最近的已有父目录。root 尚未创建时停在 root。"""
     if dst.is_symlink():
         return True
     p = dst.parent
-    while not p.exists() and p != p.parent:
+    while p != root and not p.exists():
         if p.is_symlink():  # 指向不存在目标的链接
             return True
         p = p.parent
-    pr = p.resolve()
-    return not (pr == root or root in pr.parents or pr in root.parents)
+    return not p.resolve().is_relative_to(root)
 
 
 def main(argv: list[str] | None = None) -> int:

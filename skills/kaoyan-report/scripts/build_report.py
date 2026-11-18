@@ -21,10 +21,9 @@
   sparse_pages     最后一页以外、内容不到三成的页（通常是大表格或图整块挤到下一页）
   sheet            全部页拼成的一张缩略图，要肉眼看时只看这一张
 
-正文里能用的写法见同目录上一级的 SKILL.md。构建目录是输出 PDF 旁边的 _build/；
-每次构建的浏览器配置和中间文件放在其中一个单独的 run-* 子目录里，构建完删掉，
-所以同一个输出目录里并行构建不同文件名的报告不会互相干扰。
-正文里图片的相对路径按 Markdown 源文件所在目录解析。
+正文里能用的写法见同目录上一级的 SKILL.md。每次构建在输出 PDF 旁边的 _build/ 中
+独占一个子目录，保留 HTML、资源和缩略图。浏览器配置及中间 PDF 在构建结束时清理。
+本地图片按 Markdown 源文件所在目录解析，HTML 以相对地址引用构建目录内的副本。
 """
 from __future__ import annotations
 
@@ -40,8 +39,10 @@ import subprocess
 import sys
 import tempfile
 import time
+from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit, urlunsplit
+from urllib.request import url2pathname
 
 HERE = Path(__file__).resolve().parent
 ASSETS = HERE.parent / "assets"
@@ -51,41 +52,108 @@ PANDOC_FROM = "markdown+pipe_tables+tex_math_dollars+raw_html+fenced_divs"
 
 # ---------- 纯函数（有单测） ----------
 
-_PIPE_TOKEN = re.compile(r"\\\\|\\\||\|")  # 依次匹配：\\（换行，原样保留）、\|（双竖线）、|（单竖线）
+_WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:[\\/]")
+_SRCSET_SEPARATORS = re.compile(r"[ \t\n\r\f,]*")
+_SRCSET_URL = re.compile(r"[^ \t\n\r\f]+")
+_SRCSET_DESCRIPTORS = re.compile(r"(?:\([^)]*(?:\)|$)|[^,(])*")
 
 
-def fix_math_pipes(md: str) -> str:
-    """表格里公式中的 | 会被 pandoc 当成列分隔符：单竖线 | 换成 \\vert，双竖线 \\| 换成 \\Vert。
-    记号不变，只是不再出现裸的 | 字符。"""
-    def tok(t: re.Match) -> str:
-        s = t.group(0)
-        return s if s == "\\\\" else (r"\Vert " if s == r"\|" else r"\vert ")
+def rebase_srcset(srcset: str, rebase) -> str:
+    """只改候选 URL。URL 中间可以有逗号，描述符之间才用逗号分项。"""
+    pieces = []
+    pos = previous = 0
+    while pos < len(srcset):
+        pos = _SRCSET_SEPARATORS.match(srcset, pos).end()
+        url = _SRCSET_URL.match(srcset, pos)
+        if not url:
+            break
+        value = url.group().rstrip(",")
+        pieces.extend((srcset[previous:pos], rebase(value)))
+        previous = pos + len(value)
+        pos = url.end()
+        if previous == pos:
+            pos = _SRCSET_DESCRIPTORS.match(srcset, pos).end()
+    return "".join(pieces) + srcset[previous:]
 
-    def sub(m: re.Match) -> str:
-        return _PIPE_TOKEN.sub(tok, m.group(0))
-    md = re.sub(r"\$\$.+?\$\$", sub, md, flags=re.S)
-    return re.sub(r"(?<!\$)\$(?!\$)[^$\n]+?\$", sub, md)
+
+class ImageTagParser(HTMLParser):
+    CDATA_CONTENT_ELEMENTS = HTMLParser.CDATA_CONTENT_ELEMENTS + ("textarea", "title")
+
+    def __init__(self, html: str, rebase):
+        super().__init__()
+        self.rebase = rebase
+        self.line_offsets = [0, *(m.end() for m in re.finditer("\n", html))]
+        self.replacements: list[tuple[int, int, str]] = []
+
+    def handle_starttag(self, tag, attrs):
+        self.rewrite(tag, attrs, ">")
+
+    def handle_startendtag(self, tag, attrs):
+        self.rewrite(tag, attrs, " />")
+
+    def rewrite(self, tag, attrs, end):
+        if tag not in {"img", "source"}:
+            return
+        updated = []
+        for name, value in attrs:
+            if value is not None:
+                if tag == "img" and name == "src":
+                    value = self.rebase(value)
+                elif name == "srcset":
+                    value = rebase_srcset(value, self.rebase)
+            updated.append((name, value))
+        if updated == attrs:
+            return
+        line, col = self.getpos()
+        start = self.line_offsets[line - 1] + col
+        props = "".join(f" {k}" if v is None else f' {k}="{_html.escape(v)}"' for k, v in updated)
+        self.replacements.append((start, start + len(self.get_starttag_text()), f"<{tag}{props}{end}"))
 
 
-_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
-_IMG_SRC = re.compile(r'(<img\b[^>]*?\bsrc=")([^"]*)(")', re.I)
+def rebase_images(html: str, base: Path, build: Path) -> tuple[str, dict[str, str]]:
+    """复制本地图到构建目录，并保留相对地址到机检标签的映射。"""
+    base = base.resolve()
+    staged: dict[Path, str] = {}
+    labels: dict[str, str] = {}
 
-
-def rebase_images(html: str, base: Path) -> str:
-    """把 <img src="相对路径"> 改成按 Markdown 源文件目录解析出的 file:// 绝对地址。
-    HTML 放在 _build/ 里打印，不改的话浏览器会到 _build/ 下找图。已有协议（http:、data: 等）的不动。"""
-    def sub(m: re.Match) -> str:
-        v = _html.unescape(m.group(2))
-        if not v or v.startswith(("#", "//")):
-            return m.group(0)
-        if re.match(r"^[A-Za-z]:[\\/]", v) or v.startswith("/"):
-            p = Path(unquote(v))
-        elif _SCHEME.match(v):
-            return m.group(0)
+    def rebase(value: str) -> str:
+        address = value.strip(" \t\r\n\f")
+        if not address or address.startswith(("#", "//")):
+            return value
+        is_drive_path = _WINDOWS_DRIVE.match(address)
+        parts = urlsplit(address[2:] if is_drive_path else address)
+        if parts.scheme == "file":
+            authority = f"//{parts.netloc}" if parts.netloc and parts.netloc.lower() != "localhost" else ""
+            path = url2pathname(authority + parts.path)
+        elif parts.scheme:
+            return value
         else:
-            p = base / unquote(v.split("#", 1)[0].split("?", 1)[0])
-        return m.group(1) + _html.escape(p.resolve().as_uri()) + m.group(3)
-    return _IMG_SRC.sub(sub, html)
+            path = (address[:2] if is_drive_path else "") + unquote(parts.path)
+        if not path:
+            return value
+        source = (base / path).resolve()
+        if source not in staged:
+            suffix = source.suffix.lower()
+            safe_suffix = suffix if re.fullmatch(r"\.[a-z0-9]{1,10}", suffix) else ""
+            relative = f"images/image-{len(staged) + 1}{safe_suffix}"
+            staged[source] = relative
+            labels[relative] = (source.relative_to(base).as_posix() if source.is_relative_to(base)
+                                else "本地图片（源目录外）")
+            if source.is_file():
+                target = build / relative
+                target.parent.mkdir(exist_ok=True)
+                shutil.copyfile(source, target)
+        return urlunsplit(("", "", staged[source], parts.query, parts.fragment))
+
+    parser = ImageTagParser(html, rebase)
+    parser.feed(html)
+    parser.close()
+    chunks = []
+    pos = 0
+    for start, end, tag in parser.replacements:
+        chunks.extend((html[pos:start], tag))
+        pos = end
+    return "".join(chunks) + html[pos:], labels
 
 
 def inject_figs(html: str, figs: dict) -> str:
@@ -105,10 +173,14 @@ def css_string(s: str) -> str:
 
 
 def fill_template(tpl: str, title: str, date: str, body: str) -> str:
-    esc_title, esc_date = _html.escape(title), _html.escape(date)
-    css_title, css_date = css_string(title), css_string(date)
-    return (tpl.replace("{{TITLE_CSS}}", css_title).replace("{{DATE_CSS}}", css_date)
-               .replace("{{TITLE}}", esc_title).replace("{{DATE}}", esc_date).replace("<!--BODY-->", body))
+    slots = {
+        "{{TITLE_CSS}}": css_string(title),
+        "{{DATE_CSS}}": css_string(date),
+        "{{TITLE}}": _html.escape(title),
+        "{{DATE}}": _html.escape(date),
+        "<!--BODY-->": body,
+    }
+    return re.sub(r"\{\{(?:TITLE|DATE)(?:_CSS)?\}\}|<!--BODY-->", lambda m: slots[m.group()], tpl)
 
 
 def leftover_math(text: str) -> list[str]:
@@ -162,7 +234,7 @@ def md_to_html(md: str) -> str:
     pandoc = shutil.which("pandoc")
     if not pandoc:
         raise FileNotFoundError("找不到 pandoc：https://pandoc.org/installing.html")
-    return subprocess.run([pandoc, "-f", PANDOC_FROM, "-t", "html", "--mathjax"], input=fix_math_pipes(md),
+    return subprocess.run([pandoc, "-f", PANDOC_FROM, "-t", "html", "--mathjax"], input=md,
                           capture_output=True, text=True, encoding="utf-8", check=True).stdout
 
 
@@ -216,31 +288,79 @@ def scan_pages(pdf: Path, title: str, date: str, build: Path) -> dict:
             "blank_pages": blank, "sparse_pages": sparse, "sheet": str(sheet)}
 
 
-PROBE_JS = (
-    "<style>html,body{width:180mm!important;max-width:180mm!important;margin:0!important;padding:0!important}</style>"
-    "<script>window.addEventListener('load',function(){setTimeout(function(){var R=document.body.getBoundingClientRect().right+1,o=[],g=[];"
-    "document.querySelectorAll('.katex-display,table,pre,img,svg,.tiles,.ch,.flow,div').forEach(function(e){"
-    "if(e.closest('.katex-display')&&!e.classList.contains('katex-display'))return;"
-    "var r=e.getBoundingClientRect();if(e.scrollWidth>e.clientWidth+2||r.right>R){o.push((e.innerText||e.tagName).replace(/\\s+/g,' ').slice(0,40))}});"
-    "Array.prototype.forEach.call(document.images,function(i){if(!i.complete||!i.naturalWidth){g.push(i.getAttribute('src')||'')}});"
-    "var p=document.createElement('pre');p.id='__ovf';p.textContent=JSON.stringify({o:o.slice(0,10),g:g.slice(0,10)});document.body.appendChild(p)},300)})</script>"
-)
+PROBE_JS = r"""
+<style>html,body{width:180mm!important;max-width:180mm!important;margin:0!important;padding:0!important}</style>
+<script>
+window.addEventListener('DOMContentLoaded', async () => {
+    let timer;
+    const deadline = new Promise(resolve => { timer = setTimeout(() => resolve('timeout'), 5000); });
+    const images = Array.from(document.images, async (image, index) => {
+        const finished = new Promise(resolve => {
+            image.addEventListener('load', () => resolve('loaded'), {once: true});
+            image.addEventListener('error', () => resolve('failed'), {once: true});
+            image.loading = 'eager';
+            if (image.complete) resolve(image.naturalWidth ? 'loaded' : 'failed');
+        });
+        const state = await Promise.race([finished, deadline]);
+        if (state === 'loaded') return null;
+        return [index + 1, image.currentSrc || image.src, state];
+    });
+    const missing = (await Promise.all(images)).filter(Boolean);
+    clearTimeout(timer);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    const right = document.body.getBoundingClientRect().right + 1;
+    const overflowing = [];
+    document.querySelectorAll('.katex-display,table,pre,img,svg,.tiles,.ch,.flow,div').forEach(element => {
+        if (element.closest('.katex-display') && !element.classList.contains('katex-display')) return;
+        if (element.scrollWidth > element.clientWidth + 2 || element.getBoundingClientRect().right > right) {
+            overflowing.push((element.innerText || element.tagName).replace(/\s+/g, ' ').slice(0, 40));
+        }
+    });
+    const result = document.createElement('pre');
+    result.id = '__ovf';
+    result.textContent = JSON.stringify({o: overflowing.slice(0, 10), g: missing.slice(0, 10)});
+    document.body.appendChild(result);
+});
+</script>
+"""
 
 
-def probe_page(chrome: str, page: Path, profile: Path) -> tuple[list[str], list[str]]:
+def missing_image_label(index: int, address: str, page: Path, labels: dict[str, str]) -> str:
+    parts = urlsplit(address)
+    if parts.scheme == "data":
+        mime = parts.path.partition(",")[0].partition(";")[0]
+        kind = mime if re.fullmatch(r"[\w.+-]+/[\w.+-]+", mime, re.ASCII) else "类型未知"
+        return f"第 {index} 张图片（data: {kind}）"
+    if parts.scheme in {"https", "http"} or (parts.netloc and not parts.scheme):
+        return urlunsplit((parts.scheme, parts.netloc.rsplit("@", 1)[-1], parts.path, "", ""))
+    if parts.scheme == "file":
+        path = Path(url2pathname(parts.path))
+        if path.is_relative_to(page.parent):
+            return labels.get(path.relative_to(page.parent).as_posix(), f"第 {index} 张图片")
+    return f"第 {index} 张图片"
+
+
+def probe_page(chrome: str, page: Path, profile: Path,
+               labels: dict[str, str] | None = None) -> tuple[list[str], list[str]]:
     """在 180 mm 宽的页面里找溢出版心的元素和没加载出来的图片。返回 (overflow, missing_images)。"""
     probe = page.with_name(f"{page.stem}_probe.html")
-    probe.write_text(page.read_text(encoding="utf-8").replace("</head>", PROBE_JS + "</head>"), encoding="utf-8")
+    probe.write_text(page.read_text(encoding="utf-8").replace("</head>", PROBE_JS + "</head>", 1), encoding="utf-8")
     try:
         dom = subprocess.run([chrome, *chrome_flags(profile), "--window-size=700,1000", "--dump-dom", probe.as_uri()],
-                             capture_output=True, text=True, encoding="utf-8", timeout=300).stdout
-        m = re.search(r'<pre id="__ovf">(.*?)</pre>', dom, re.S)
-        if not m:
+                             capture_output=True, text=True, encoding="utf-8", timeout=300, check=True).stdout
+        match = re.search(r'<pre id="__ovf">(.*?)</pre>', dom, re.S)
+        if not match:
             return ["机检没跑成"], []
-        d = json.loads(_html.unescape(m.group(1)))
-        return d["o"], [unquote(s) for s in d["g"]]
-    except Exception as e:  # noqa: BLE001
-        return [f"机检没跑成：{e}"], []
+        data = json.loads(_html.unescape(match.group(1)))
+        missing = []
+        for index, address, state in data["g"]:
+            label = missing_image_label(index, address, page, labels or {})
+            missing.append(f"{label}（加载超时）" if state == "timeout" else label)
+        return data["o"], missing
+    except subprocess.TimeoutExpired:
+        return ["机检超时"], []
+    except (OSError, subprocess.CalledProcessError, ValueError, KeyError):
+        return ["机检没跑成"], []
     finally:
         probe.unlink(missing_ok=True)
 
@@ -253,12 +373,12 @@ def build(src: Path, out: Path, title: str, date: str, figmod: Path | None = Non
 
     chrome = find_chrome(chrome)
     body = inject_figs(md_to_html(src.read_text(encoding="utf-8")), load_figs(figmod))
-    body = rebase_images(body, src.parent)
+    builds = out.parent / "_build"
+    builds.mkdir(parents=True, exist_ok=True)
+    bdir = Path(tempfile.mkdtemp(prefix="report-", dir=builds)).resolve()
+    body, labels = rebase_images(body, src.parent, bdir)
 
-    bdir = out.parent / "_build"
-    bdir.mkdir(parents=True, exist_ok=True)
-    if not (bdir / "katex" / "katex.min.js").exists():
-        shutil.copytree(ASSETS / "katex", bdir / "katex", dirs_exist_ok=True)
+    shutil.copytree(ASSETS / "katex", bdir / "katex")
     for n in CSS_FILES:
         shutil.copy2(ASSETS / n, bdir / n)
     page = bdir / f"{out.stem}.html"
@@ -277,7 +397,7 @@ def build(src: Path, out: Path, title: str, date: str, figmod: Path | None = Non
         out.parent.mkdir(parents=True, exist_ok=True)
         with out.open("wb") as f:
             w.write(f)
-        overflow, missing = probe_page(chrome, page, profile)
+        overflow, missing = probe_page(chrome, page, profile, labels)
         result = {"file": out.name, **scan_pages(out, title, date, bdir), "overflow": overflow, "missing_images": missing}
     finally:
         remove_profile(run)

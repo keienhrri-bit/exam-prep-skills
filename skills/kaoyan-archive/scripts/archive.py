@@ -12,8 +12,9 @@
 
 2. 执行：
    python archive.py apply plan.json [--log 99_整理记录/学习记录归档日志.md] [--dry-run]
-   只移动 action 为 move 的项；移动前确认源文件还在收件夹里、不是符号链接、内容没变，
+   只移动 action 为 move 的项；移动前确认源文件是收件夹里的普通文件、扩展名符合扫描条件、内容没变，
    目标在工作区里且没有同名文件。日志路径也必须在工作区里，否则一个文件都不动。
+   缺少扩展名记录的旧方案按默认后缀检查。曾用 --ext 扫描的旧方案可重新生成以记录自定义后缀。
    duplicate、pending、classify 都留在原处，不删除。最后在日志末尾追加一节。
 
 收件夹里的符号链接不进方案：移动它等于移动链接指向的别处的文件。
@@ -70,7 +71,7 @@ def scan(inbox: Path, workspace: Path, days: float, exts: tuple[str, ...], now: 
                       "sha256": digest, "action": "duplicate" if dup else "classify", "dup_of": dup,
                       "subject": None, "stage": None, "dest": None, "note": ""})
     return {"created": datetime.now().isoformat(timespec="seconds"), "inbox": str(inbox.resolve()),
-            "workspace": str(workspace.resolve()), "items": items}
+            "workspace": str(workspace.resolve()), "extensions": list(exts), "items": items}
 
 
 def inside(child: Path, parent: Path) -> bool:
@@ -84,6 +85,9 @@ def inside(child: Path, parent: Path) -> bool:
 def apply(plan: dict, log_rel: str | None, dry_run: bool = False) -> dict:
     ws = Path(plan["workspace"])
     inbox_r = Path(plan["inbox"]).resolve()
+    exts = plan.get("extensions", DEFAULT_EXT)
+    if not isinstance(exts, (list, tuple)) or any(not isinstance(ext, str) for ext in exts):
+        raise ValueError("方案的 extensions 必须是扩展名列表。")
     log = None
     if log_rel:
         log = Path(log_rel) if Path(log_rel).is_absolute() else ws / log_rel
@@ -108,6 +112,10 @@ def apply(plan: dict, log_rel: str | None, dry_run: bool = False) -> dict:
             skipped.append((it, "源文件已不在"))
         elif src.parent.resolve() != inbox_r:
             skipped.append((it, "源文件不在收件夹里"))
+        elif not src.is_file():
+            skipped.append((it, "源不是普通文件"))
+        elif src.suffix.lower() not in exts:
+            skipped.append((it, "源文件扩展名不符合扫描条件"))
         elif sha256(src) != it["sha256"]:
             skipped.append((it, "源文件出方案后被改过，重新出方案"))
         elif target.exists():

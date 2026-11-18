@@ -5,7 +5,7 @@
 
 - 仓库里只放通用规则。个人的词（真实姓名、用户名、院校、科目代码等）写在一个**不提交**的文件里，
   每行一个正则，用 --extra 传入；默认会读 .work/privacy-extra.txt（.work/ 已在 .gitignore 里）。
-- 文本文件逐行查全部规则。扩展名不在已知列表里的文件，只要能按 UTF-8 解码、没有 NUL 字节，也按文本查。
+- 文本文件逐行查全部规则，支持 UTF-8 和带 BOM 的 UTF-16。未知扩展名的 UTF-8 文件只有不含 NUL 字节才按文本查。
   PDF、PNG 等二进制文件查原始字节里的路径和邮箱，PDF 另外抽文字和元数据再查一遍。
 - 有命中时退出码 1。扫描目录不存在、一个文件都没扫到、--extra 指定的词表不存在、
   git 仓库里读不出提交作者时退出码 2：没查完不算通过。
@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import argparse
+import codecs
+import os
 import re
 import subprocess
 import sys
@@ -24,6 +26,7 @@ TEXT_EXT = {".md", ".txt", ".py", ".json", ".yaml", ".yml", ".css", ".html", ".j
             ".tex", ".bib", ".r", ".sql", ".rb", ".go", ".rs", ".java", ".c", ".h", ".cpp", ".lua", ".php", ".ipynb"}
 BINARY_EXT = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp", ".woff2", ".woff", ".ttf", ".otf",
               ".zip", ".gz", ".7z", ".tar", ".exe", ".dll", ".so", ".dylib", ".pyc"}
+SKIP_BINARY_EXTRA_EXT = {".pdf", ".png", ".jpg", ".jpeg", ".woff2", ".woff", ".ttf", ".zip"}
 VENDORED = ("skills/kaoyan-report/assets/katex/",)
 ALLOWED_EMAIL = re.compile(r"@(users\.noreply\.github\.com|example\.(com|org))$", re.I)
 
@@ -65,9 +68,11 @@ def decode_text(p: Path, data: bytes) -> str | None:
     suf = p.suffix.lower()
     if suf in BINARY_EXT:
         return None
+    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return data.decode("utf-16", errors="replace")
     if suf in TEXT_EXT:
         return data.decode("utf-8", errors="replace")
-    if b"\x00" in data[:8192]:
+    if b"\x00" in data:
         return None
     try:
         return data.decode("utf-8")
@@ -112,21 +117,53 @@ def scan_binary(rel: str, data: bytes, extra) -> list[str]:
     return hits
 
 
+def find_git_marker(root: Path) -> Path | None:
+    """识别普通仓库、工作树的 .git 文件和裸仓库，即使 Git 无法打开它们。"""
+    for directory in (root, *root.parents):
+        if os.path.lexists(directory / ".git"):
+            return directory / ".git"
+        if (os.path.lexists(directory / "HEAD") and (directory / "objects").is_dir()
+                and (directory / "refs").is_dir()):
+            return directory
+    return None
+
+
 def git_authors(root: Path) -> tuple[list[str], str | None, bool]:
-    """返回 (可疑的提交作者, 说明, 是否没查成)。不是 git 仓库或还没有提交时只给说明，不算失败。"""
+    """返回 (可疑的提交作者, 说明, 是否没查成)。"""
     def git(*args):
-        return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, encoding="utf-8")
+        return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", env={**os.environ, "LC_ALL": "C"})
+
+    not_repo = "不是 git 仓库，没查提交作者"
+    marker = find_git_marker(root)
     try:
-        inside = git("rev-parse", "--is-inside-work-tree")
+        discovery = git("rev-parse", "--absolute-git-dir")
+        if discovery.returncode != 0:
+            if not marker and discovery.stderr.startswith("fatal: not a git repository"):
+                return [], not_repo, False
+            return [], "Git 无法读取仓库，没查提交作者，不算通过。", True
+        if marker:
+            # 损坏的内层仓库可能被 Git 跳过，误读上级仓库的提交。
+            expected = git("rev-parse", "--resolve-git-dir", str(marker))
+            if (expected.returncode != 0
+                    or Path(expected.stdout.strip()).resolve() != Path(discovery.stdout.strip()).resolve()):
+                return [], "Git 无法读取扫描目录对应的仓库，没查提交作者，不算通过。", True
+        if git("rev-parse", "--verify", "-q", "HEAD^{commit}").returncode != 0:
+            head = git("symbolic-ref", "--quiet", "HEAD")
+            if head.returncode == 0 and head.stdout.startswith("refs/heads/"):
+                refs = git("for-each-ref", "--format=%(refname)")
+                if refs.returncode == 0 and not refs.stdout.strip() and not refs.stderr.strip():
+                    return [], "还没有提交，没查提交作者", False
+            return [], "Git 无法读取 HEAD，没查提交作者，不算通过。", True
+        r = git("log", "--encoding=UTF-8", "--format=%an <%ae>|%cn <%ce>")
     except FileNotFoundError:
-        return [], "没找到 git，没查提交作者", False
-    if inside.returncode != 0:
-        return [], "不是 git 仓库，没查提交作者", False
-    if git("rev-parse", "--verify", "-q", "HEAD").returncode != 0:
-        return [], "还没有提交，没查提交作者", False
-    r = git("log", "--format=%an <%ae>|%cn <%ce>")
-    if r.returncode != 0:
-        return [], f"git log 没跑成：{(r.stderr or '').strip()[:200]}", True
+        if not marker:
+            return [], not_repo, False
+        return [], "没找到 Git，没查提交作者，不算通过。", True
+    except OSError:
+        return [], "无法运行 Git，没查提交作者，不算通过。", True
+    if r.returncode != 0 or not r.stdout.strip():
+        return [], "git log 没跑成，提交作者未查完，不算通过。", True
     out = r.stdout
     bad = set()
     for line in out.splitlines():
@@ -173,9 +210,10 @@ def main(argv: list[str] | None = None) -> int:
         else:
             hits += scan_binary(rel, data, extra)
             # 压缩过的 PDF、图片、字体里按私有词表搜原始字节只会误报；PDF 已在上面抽文字查过
-            if p.suffix.lower() not in BINARY_EXT:
-                for name, rx in extra:
-                    if rx.search(data.decode("latin-1")):
+            if extra and p.suffix.lower() not in SKIP_BINARY_EXTRA_EXT:
+                raw_text = data.decode("latin-1")
+                for _, rx in extra:
+                    if rx.search(raw_text):
                         hits.append(f"{rel}  私有词表（二进制）  {rx.pattern}")
     authors, note, git_failed = git_authors(root)
     hits += authors

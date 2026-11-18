@@ -22,6 +22,19 @@ def test_wiener_first_antinode_is_quarter_wavelength_above_mirror():
     assert abs((mirror_y - ys[0]) - half / 2) < 1e-9, f"镜面 y={mirror_y}，第一层波腹 y={ys[0]}，应相距 {half / 2}"
 
 
+def test_wiener_quarter_wavelength_dimension_spans_mirror_to_first_antinode():
+    root = ET.parse(SVG).getroot()
+    mirror_y = min(float(r.get("y")) for r in root.findall("s:rect", NS) if r.get("y"))
+    dashed = next(g for g in root.findall("s:g", NS) if g.get("stroke-dasharray"))
+    antinode_y = max(float(re.match(r"M\S+ (\S+) H", p.get("d")).group(1)) for p in dashed.findall("s:path", NS))
+    dimension, = [line for line in root.findall("s:line", NS) if float(line.get("y2")) == mirror_y]
+    assert float(dimension.get("y1")) == antinode_y
+    assert dimension.get("x1") == dimension.get("x2")
+    tip_pattern = rf"M\S+ \S+ L{re.escape(dimension.get('x1'))} (\S+) L\S+ \S+"
+    arrow, = [m for p in root.findall("s:path", NS) if (m := re.fullmatch(tip_pattern, p.get("d")))]
+    assert float(arrow.group(1)) == antinode_y
+
+
 def test_wiener_intersections_lie_on_plate_and_antinodes():
     root = ET.parse(SVG).getroot()
     x0, y0, x1, y1 = map(float, re.findall(r"[\d.]+", root.find("s:path", NS).get("d")))

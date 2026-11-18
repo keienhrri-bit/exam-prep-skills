@@ -144,6 +144,7 @@ def test_tag_quotes_does_not_split_decimals_or_negatives():
     corpus = tq.build_corpus(["电压变为原来的 1.5 倍。温度降到 -1 度。"])
     assert tq.tag_line("1.5 倍", tq.build_corpus(["只有 5 倍"])) == ("【转述】1.5 倍", False)
     assert tq.tag_line("电压变为原来的 1.5 倍。", corpus) == ("【讲义原话】电压变为原来的 1.5 倍。", True)
+    assert tq.tag_line("-1 度", corpus) == ("【讲义原话】-1 度", True)
     assert tq.tag_line("- -1 度", corpus) == ("- 【讲义原话】-1 度", True)
     assert tq.tag_line("1、电压变为原来的 1.5 倍", corpus)[0].startswith("1、【讲义原话】")
 
@@ -152,6 +153,29 @@ def test_tag_quotes_does_not_match_across_lecture_files():
     corpus = tq.build_corpus(["……摩擦力总是", "阻碍运动。……"])
     assert tq.tag_line("摩擦力总是阻碍运动。", corpus) == ("【转述】摩擦力总是阻碍运动。", False)
     assert tq.tag_line("阻碍运动。", corpus)[1] is True
+
+
+def test_tag_quotes_does_not_match_across_nul_boundary():
+    line = "前半\x00后半"
+    assert tq.tag_line(line, tq.build_corpus(["前半", "后半"])) == ("【转述】" + line, False)
+    assert tq.tag_line(line, tq.build_corpus(["前半\x00后半"])) == ("【讲义原话】" + line, True)
+
+
+def test_tag_quotes_accepts_numbered_parenthesis_without_space():
+    corpus = tq.build_corpus(["惯性与物体的质量有关。"])
+    assert tq.tag_line("1)惯性与物体的质量有关。", corpus) == ("1)【讲义原话】惯性与物体的质量有关。", True)
+
+
+def test_tag_quotes_cli_reports_matching_lecture_file(tmp_path):
+    first, second, sentences = (tmp_path / name for name in ("first.md", "second.md", "sentences.md"))
+    first.write_text("位移是矢量。\n", encoding="utf-8")
+    second.write_text("速率是标量。\n", encoding="utf-8")
+    sentences.write_text("\n速率是标量。\n", encoding="utf-8")
+    result = subprocess.run([sys.executable, tq.__file__, "--lecture", str(first), str(second),
+                             "--sentences", str(sentences)],
+                            capture_output=True, text=True, encoding="utf-8", env=UTF8, check=True)
+    assert result.stdout == "\n【讲义原话】速率是标量。\n"
+    assert "第 2 行" in result.stderr and "second.md" in result.stderr and "first.md" not in result.stderr
 
 
 def test_example_pack_tags_are_honest():
@@ -193,6 +217,13 @@ def test_privacy_scan_reads_scripts_and_unknown_text_files(tmp_path, capsys):
     assert "deploy.ps1:1" in out and "notes.weird:1" in out
 
 
+def test_privacy_scan_checks_unknown_suffix_past_first_chunk(tmp_path):
+    path = tmp_path / "data.unknown"
+    text = ("a" * 8193 + "段落").encode("utf-8")
+    assert scan.decode_text(path, text) == text.decode("utf-8")
+    assert scan.decode_text(path, text + b"\x00") is None
+
+
 def test_privacy_scan_fails_when_nothing_was_checked(tmp_path, capsys):
     assert scan.main(["--root", str(tmp_path / "不存在的目录")]) == 2
     assert scan.main(["--root", str(tmp_path)]) == 2  # 空目录：一个文件都没扫到
@@ -200,6 +231,127 @@ def test_privacy_scan_fails_when_nothing_was_checked(tmp_path, capsys):
     assert scan.main(["--root", str(tmp_path)]) == 0
     assert scan.main(["--root", str(tmp_path), "--extra", str(tmp_path / "没有的词表.txt")]) == 2
     assert "不算通过" in capsys.readouterr().out
+
+
+
+def test_archive_apply_rechecks_source_type_and_extensions(tmp_path):
+    inbox, ws = _ws(tmp_path)
+    csv = inbox / "table.csv"
+    csv.write_text("x,y", encoding="utf-8")
+    plan = arch.scan(inbox, ws, days=3, exts=(".csv",))
+    plan["items"][0].update(action="move", dest="10_数学")
+    other = inbox / "new.md"
+    folder = inbox / "directory.csv"
+    folder.mkdir()
+    for path in (other, folder):
+        plan["items"].append({
+            "src": str(path), "name": path.name, "action": "move", "dest": "10_数学",
+            "sha256": arch.sha256(other),
+        })
+    result = arch.apply(plan, None)
+    assert [it["name"] for it, _ in result["moved"]] == ["table.csv"]
+    assert [it["name"] for it, _ in result["skipped"]] == ["new.md", "directory.csv"]
+    assert other.is_file() and folder.is_dir()
+
+
+def test_archive_apply_refuses_non_list_extensions(tmp_path):
+    inbox, ws = _ws(tmp_path)
+    plan = arch.scan(inbox, ws, days=3, exts=(".md",))
+    approved = next(item for item in plan["items"] if item["name"] == "new.md")
+    approved.update(action="move", dest="10_数学")
+    plan["extensions"] = ".md.other"
+    with pytest.raises(ValueError, match="extensions"):
+        arch.apply(plan, None)
+    assert (inbox / "new.md").is_file()
+
+
+def test_archive_apply_uses_default_extensions_for_legacy_plan(tmp_path):
+    inbox, ws = _ws(tmp_path)
+    path = inbox / "photo.jpg"
+    plan = arch.scan(inbox, ws, days=3, exts=(".md",))
+    plan.pop("extensions", None)
+    plan["items"].append({
+        "src": str(path), "name": path.name, "sha256": arch.sha256(path),
+        "action": "move", "dest": "10_数学",
+    })
+    result = arch.apply(plan, None)
+    assert not result["moved"] and len(result["skipped"]) == 1
+    assert path.is_file()
+
+
+def test_init_workspace_refuses_link_to_workspace_ancestor(tmp_path):
+    workspace = tmp_path / "outer" / "ws"
+    workspace.mkdir(parents=True)
+    _link_dir(workspace / "10_数学", workspace.parent)
+    assert init.main([str(workspace), "--subject", "10_数学"]) == 2
+    assert list(workspace.parent.iterdir()) == [workspace]
+
+
+def test_privacy_scan_checks_extra_rules_in_executable_bytes(tmp_path, capsys):
+    rules = tmp_path / ".work" / "privacy-extra.txt"
+    rules.parent.mkdir()
+    rules.write_text("FixtureOnlyMarker\n", encoding="utf-8")
+    for name in ("sample.exe", "sample.dll"):
+        (tmp_path / name).write_bytes(b"\x00\xffFixtureOnlyMarker\x00")
+    assert scan.main(["--root", str(tmp_path)]) == 1
+    out = capsys.readouterr().out
+    for name in ("sample.exe", "sample.dll"):
+        assert f"{name}  私有词表（二进制）" in out
+
+
+@pytest.mark.parametrize("discovery_error", ["missing", "ownership"])
+def test_privacy_scan_refuses_git_discovery_failure_in_repository(tmp_path, monkeypatch, discovery_error):
+    # linked worktree 的 .git 是文件。
+    (tmp_path / ".git").write_text("gitdir: metadata\n", encoding="utf-8")
+    (tmp_path / "a.md").write_text("clean", encoding="utf-8")
+
+    def git_unavailable(args, **kwargs):
+        if discovery_error == "missing":
+            raise FileNotFoundError("git")
+        return subprocess.CompletedProcess(args, 128, stdout="", stderr="fatal: detected dubious ownership")
+
+    monkeypatch.setattr(scan.subprocess, "run", git_unavailable)
+    assert scan.main(["--root", str(tmp_path)]) == 2
+
+
+def test_privacy_scan_allows_non_repository_without_git(tmp_path, monkeypatch):
+    (tmp_path / "a.md").write_text("clean", encoding="utf-8")
+
+    def git_unavailable(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(scan.subprocess, "run", git_unavailable)
+    # CI 的临时目录也可以放在仓库内；这里隔离“无仓库标记”的分支。
+    monkeypatch.setattr(scan, "find_git_marker", lambda root: None)
+    assert scan.main(["--root", str(tmp_path)]) == 0
+
+
+def _init_scan_repo(path):
+    subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True, capture_output=True)
+    (path / "a.md").write_text("clean", encoding="utf-8")
+
+
+def test_privacy_scan_allows_unborn_repository(tmp_path, capsys):
+    _init_scan_repo(tmp_path)
+    assert scan.main(["--root", str(tmp_path)]) == 0
+    assert "还没有提交" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("corruption", ["head", "branch"])
+def test_privacy_scan_refuses_broken_head(tmp_path, corruption):
+    _init_scan_repo(tmp_path)
+    ref = ".git/HEAD" if corruption == "head" else ".git/refs/heads/main"
+    (tmp_path / ref).write_text("invalid reference\n", encoding="ascii")
+    assert scan.main(["--root", str(tmp_path)]) == 2
+
+
+@pytest.mark.parametrize("byte_order", [b"\xff\xfe", b"\xfe\xff"])
+def test_privacy_scan_reads_bom_utf16_powershell(tmp_path, capsys, byte_order):
+    key = "sk-" + "a1B2" * 6
+    encoding = "utf-16-le" if byte_order == b"\xff\xfe" else "utf-16-be"
+    (tmp_path / "deploy.ps1").write_bytes(byte_order + f'$k = "{key}"\r\n'.encode(encoding))
+    assert scan.main(["--root", str(tmp_path)]) == 1
+    assert "deploy.ps1:1" in capsys.readouterr().out
 
 
 def test_repo_passes_privacy_scan():

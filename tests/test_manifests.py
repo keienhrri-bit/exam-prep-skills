@@ -53,7 +53,22 @@ def test_manifests_agree():
     mk = json.loads((ROOT / ".claude-plugin/marketplace.json").read_text(encoding="utf-8"))
     cx = json.loads((ROOT / ".codex-plugin/plugin.json").read_text(encoding="utf-8"))
     assert cc["name"] == mk["plugins"][0]["name"] == cx["name"] == "kaoyan-study-skills"
-    assert cc["version"] == cx["version"]
+    assert cc["version"] == mk["plugins"][0].get("version") == cx["version"]
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    assert re.search(rf"^## {re.escape(cc['version'])}\b", changelog, re.M), "CHANGELOG 没有当前版本"
+    latest = re.search(r"^## (\d+\.\d+\.\d+)\b", changelog, re.M)
+    assert latest and latest.group(1) == cc["version"], "CHANGELOG 最新版本与清单不一致"
     assert (ROOT / cx["onboardingSkill"]).exists()
+
+
+@pytest.mark.parametrize("path,pattern", [
+    ("kaoyan-report/SKILL.md", r"^## 流程\s*\n(1\. [^\n]*)"),
+    ("kaoyan-setup/assets/workspace-template/CLAUDE.md", r"^(- \*\*外援的文字不进成稿\*\*[^\n]*)"),
+], ids=["skill", "template"])
+def test_long_writer_setting_is_honored_in_workflow_and_template(path, pattern):
+    text = (SKILLS / path).read_text(encoding="utf-8")
+    step = re.search(pattern, text, flags=re.M).group(1)
+    assert re.search(r"先读 `kaoyan.yaml` 的 `roles\.long_writer`", step)
+    assert re.search(r"`main`[^。]*主会话", step)
+    assert re.search(r"`subagent`[^。]*5000 字[^。]*新推导[^。]*`writer`", step)
+    config = (SKILLS / "kaoyan-setup/assets/workspace-template/kaoyan.yaml").read_text(encoding="utf-8")
+    assert re.search(r"^  long_writer: subagent\b", config, flags=re.M)
