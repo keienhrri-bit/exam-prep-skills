@@ -20,6 +20,18 @@ def load(rel: str, name: str):
     return mod
 
 
+def link_dir(link, target):
+    """建目录链接：Windows 用目录联接（不要管理员权限），其他系统用符号链接。建不了就跳过。"""
+    try:
+        if os.name == "nt":
+            import _winapi
+            _winapi.CreateJunction(str(target), str(link))
+        else:
+            os.symlink(target, link, target_is_directory=True)
+    except (OSError, AttributeError, NotImplementedError) as e:
+        pytest.skip(f"建不了目录链接：{e}")
+
+
 def need_tools(*names):
     """缺外部程序时跳过；CI 里设 KAOYAN_REQUIRE_E2E=1 时改成失败。"""
     missing = [n for n in names if not shutil.which(n)]

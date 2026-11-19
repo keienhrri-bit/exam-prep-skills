@@ -19,6 +19,7 @@ import argparse
 import codecs
 import os
 import re
+import stat
 import subprocess
 import sys
 from collections import Counter
@@ -88,10 +89,22 @@ def decode_text(p: Path, data: bytes) -> str | None:
         return None
 
 
-def files(root: Path):
-    for p in sorted(root.rglob("*")):
-        if p.is_file() and not any(part in SKIP_DIRS for part in p.relative_to(root).parts):
-            yield p
+def is_dir_link(path: str) -> bool:
+    """符号链接或 Windows 目录联接（Python 3.11 的 os.walk 和 rglob 会跟进联接）。"""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return True
+    return stat.S_ISLNK(st.st_mode) or getattr(st, "st_reparse_tag", 0) == getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", -1)
+
+
+def files(root: Path) -> list[Path]:
+    """要扫的文件。SKIP_DIRS 整个不进去，目录链接不跟进：链接指向的内容不在仓库里，还可能绕成环。"""
+    found = []
+    for current, dirs, names in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not is_dir_link(os.path.join(current, d))]
+        found += [p for p in (Path(current, n) for n in names) if p.is_file()]
+    return sorted(found)
 
 
 def scan_text(rel: str, text: str, rules) -> list[str]:

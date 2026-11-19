@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from conftest import ROOT, load
+from conftest import ROOT, link_dir, load
 
 arch = load("skills/kaoyan-archive/scripts/archive.py", "archive")
 init = load("skills/kaoyan-setup/scripts/init_workspace.py", "init_workspace")
@@ -65,16 +65,7 @@ def test_archive_apply_refuses_escape_and_changed_source(tmp_path):
     assert (inbox / "new.md").exists()
 
 
-def _link_dir(link, target):
-    """建目录链接：Windows 用目录联接（不要管理员权限），其他系统用符号链接。建不了就跳过。"""
-    try:
-        if os.name == "nt":
-            import _winapi
-            _winapi.CreateJunction(str(target), str(link))
-        else:
-            os.symlink(target, link, target_is_directory=True)
-    except (OSError, AttributeError, NotImplementedError) as e:
-        pytest.skip(f"建不了目录链接：{e}")
+_link_dir = link_dir
 
 
 def _link_file(link, target):
@@ -391,6 +382,20 @@ def test_privacy_scan_still_reads_unknown_bom_files_as_utf16_text(tmp_path, caps
     (tmp_path / "notes.weird").write_bytes(b"\xff\xfe" + f"第一行\r\ntoken {token}\r\n".encode("utf-16-le"))
     assert scan.main(["--root", str(tmp_path)]) == 1
     assert "notes.weird:2:7  GitHub token" in capsys.readouterr().out
+
+
+def test_privacy_scan_prunes_skipped_dirs_and_directory_links(tmp_path):
+    """跳过的目录不进去；目录链接（含 Windows 目录联接）不跟进，免得扫到仓库外、绕成环。"""
+    root, outside = tmp_path / "root", tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    (root / "a.md").write_text("干净\n", encoding="utf-8")
+    (outside / "leak.md").write_text("token ghp_" + "L" * 30 + "\n", encoding="utf-8")
+    link_dir(root / "linked", outside)
+    (root / ".work").mkdir()
+    link_dir(root / ".work" / "loop", root)
+    assert scan.main(["--root", str(root)]) == 0
+    assert [p.name for p in scan.files(root)] == ["a.md"]
 
 
 def test_repo_passes_privacy_scan():
