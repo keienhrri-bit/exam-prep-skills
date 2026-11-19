@@ -503,6 +503,21 @@ def test_build_reports_refused_images_and_keeps_going(tmp_path):
     assert "格式有误" in result["missing_images"][0]
 
 
+def test_build_still_flags_broken_and_wide_formulas(tmp_path):
+    """换 KaTeX 版本后机检照样有效：坏公式记进 unrendered_math，过宽的行间公式记进 overflow。"""
+    _need_browser()
+    md = tmp_path / "report.md"
+    wide = " + ".join(f"a_{{{i}}} b_{{{i}}}" for i in range(1, 90))
+    md.write_text("# 公式\n\n正常的 $E = mc^2$ 和\n\n$$F = ma \\tag{1}$$\n\n"
+                  f"坏的 $\\frac{{1}}$ 一处。\n\n$$S = {wide}$$\n", encoding="utf-8")
+    result = br.build(md, tmp_path / "out" / "report.pdf", "标题", "")
+    assert "\\frac" in result["unrendered_math"], result
+    assert "$" not in result["unrendered_math"] and "\\tag" not in result["unrendered_math"], result
+    # 只有那条过宽的公式超出版心；innerText 里的字母是数学斜体，按加号认
+    assert len(result["overflow"]) == 1 and "+" in result["overflow"][0], result
+    assert result["missing_images"] == []
+
+
 def test_build_refuses_missing_asset_dir(tmp_path):
     md = tmp_path / "report.md"
     md.write_text("# 正文\n", encoding="utf-8")
