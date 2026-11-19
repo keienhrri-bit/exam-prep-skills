@@ -5,10 +5,11 @@
 """Markdown → PDF 报告：pandoc 转 HTML，KaTeX 渲染公式，Chrome（或 Edge、Chromium）无头打印，最后做版面机检。
 
 用法：
-  uv run build_report.py <正文.md> <输出.pdf> "<页眉标题>" "<日期>" [图模块.py] [--json] [--strict]
+  uv run build_report.py <正文.md> <输出.pdf> "<页眉标题>" "<日期>" [图模块.py] [--json] [--strict] [--assets 目录]
 
   --json     机检结果按 JSON 打印（默认打印 Python 字典）
   --strict   unrendered_math、blank_pages、overflow、missing_images 任一非空时退出码为 1
+  --assets   源文件所在目录以外、允许取图片的素材目录，可以写多次
   --author   写进 PDF 元数据的作者，默认空
   --chrome   浏览器路径；也可以用环境变量 KAOYAN_CHROME
 
@@ -17,13 +18,17 @@
   unrendered_math  PDF 文字里残留的 $ 或 \\命令（公式没渲染出来）
   blank_pages      几乎没字也没图的页
   overflow         宽过版心（180 mm）被裁掉的公式、表格、图，给前 40 字
-  missing_images   没加载出来的图片（路径写错、文件不在）
+  missing_images   没加载出来的图片（路径写错、文件不在），以及因为下面的规则没复制的图片
   sparse_pages     最后一页以外、内容不到三成的页（通常是大表格或图整块挤到下一页）
   sheet            全部页拼成的一张缩略图，要肉眼看时只看这一张
 
 正文里能用的写法见同目录上一级的 SKILL.md。每次构建在输出 PDF 旁边的 _build/ 中
 独占一个子目录，保留 HTML、资源和缩略图。浏览器配置及中间 PDF 在构建结束时清理。
-本地图片按 Markdown 源文件所在目录解析，HTML 以相对地址引用构建目录内的副本。只复制常见图片格式（png、jpg、gif、svg、webp 等）；写成图片的其他文件不复制，机检记为缺图。
+
+本地图片按 Markdown 源文件所在目录解析（正文里有 <base href> 时按它解析，输出的 HTML 去掉 <base>），
+HTML 以相对地址引用构建目录内的副本。只复制同时满足这几条的文件，其余不复制、直接记为缺图：
+解析链接后的真实路径在源文件所在目录或 --assets 目录里；后缀是常见图片格式（png、jpg、gif、svg、webp 等）；
+文件开头确实是图片。缺图诊断不写源目录以外的路径和远程地址的查询串。
 """
 from __future__ import annotations
 
@@ -41,7 +46,7 @@ import tempfile
 import time
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import unquote, urlsplit, urlunsplit
+from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 from urllib.request import url2pathname
 
 HERE = Path(__file__).resolve().parent
@@ -53,8 +58,13 @@ PANDOC_FROM = "markdown+pipe_tables+tex_math_dollars+raw_html+fenced_divs"
 # ---------- 纯函数（有单测） ----------
 
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:[\\/]")
-# 只有这些后缀会被当作图片复制进构建目录。误写成图片的文稿、配置等文件不复制，免得原文落进保留的 _build。
+# 后缀是这些、文件头也确实是图片的，才会被复制进构建目录。误写成图片的文稿、配置等文件不复制，免得原文落进保留的 _build。
 _IMAGE_SUFFIXES = frozenset({".apng", ".avif", ".bmp", ".gif", ".ico", ".jpeg", ".jpg", ".png", ".svg", ".webp"})
+_IMAGE_SIGNATURES = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a", b"BM", b"\x00\x00\x01\x00")
+_SVG_START = re.compile(rb"(?:\xef\xbb\xbf)?\s*(?:<\?xml[^>]*>\s*)?"
+                        rb"(?:(?:<!--.*?-->|<!DOCTYPE\s[^\[>]*(?:\[.*?\])?\s*>)\s*)*<svg[\s/>]", re.S | re.I)
+_OUTSIDE = "源目录和 --assets 素材目录以外的本地图片，没复制"
+_NOT_IMAGE = "不是图片文件，没复制"
 _SRCSET_SEPARATORS = re.compile(r"[ \t\n\r\f,]*")
 _SRCSET_URL = re.compile(r"[^ \t\n\r\f]+")
 _SRCSET_DESCRIPTORS = re.compile(r"(?:\([^)]*(?:\)|$)|[^,(])*")
@@ -78,14 +88,34 @@ def rebase_srcset(srcset: str, rebase) -> str:
     return "".join(pieces) + srcset[previous:]
 
 
+def looks_like_image(data: bytes) -> bool:
+    """按文件开头判断是不是图片：PNG、JPEG、GIF、BMP、ICO、WebP、AVIF 看文件头，SVG 看开头是不是 <svg> 元素。"""
+    head = data[:64]
+    return (head.startswith(_IMAGE_SIGNATURES)
+            or (head[:4] == b"RIFF" and head[8:12] == b"WEBP")
+            or (head[4:8] == b"ftyp" and (b"avif" in head or b"avis" in head))
+            or _SVG_START.match(data, 0, 4096) is not None)
+
+
+def file_url_path(host: str, path: str, windows: bool = os.name == "nt") -> str | None:
+    """file: URL 的主机和路径换成本地路径。其他主机上的文件在 Windows 上是 UNC 共享路径；
+    别的系统没有对应的本地路径，返回 None，不能把 //主机/路径 当成本机路径去读。"""
+    local = host.lower() in ("", "localhost")
+    if not windows:
+        return unquote(path) if local else None
+    return url2pathname(path if local else f"//{host}{path}")
+
+
 class ImageTagParser(HTMLParser):
+    """改写 <img src>、<img srcset>、<source srcset>，去掉 <base>；不传 rebase 时只记下第一个 <base href>。"""
     CDATA_CONTENT_ELEMENTS = HTMLParser.CDATA_CONTENT_ELEMENTS + ("textarea", "title")
 
-    def __init__(self, html: str, rebase):
+    def __init__(self, html: str, rebase=None):
         super().__init__()
         self.rebase = rebase
         self.line_offsets = [0, *(m.end() for m in re.finditer("\n", html))]
         self.replacements: list[tuple[int, int, str]] = []
+        self.base_href: str | None = None
 
     def handle_starttag(self, tag, attrs):
         self.rewrite(tag, attrs, ">")
@@ -93,8 +123,19 @@ class ImageTagParser(HTMLParser):
     def handle_startendtag(self, tag, attrs):
         self.rewrite(tag, attrs, " />")
 
+    def replace(self, text: str) -> None:
+        line, col = self.getpos()
+        start = self.line_offsets[line - 1] + col
+        self.replacements.append((start, start + len(self.get_starttag_text()), text))
+
     def rewrite(self, tag, attrs, end):
-        if tag not in {"img", "source"}:
+        if tag == "base":
+            # 浏览器用文档里第一个带 href 的 <base>。图片地址已经按它解析过，构建页只能以自己为基址。
+            if self.base_href is None:
+                self.base_href = next((v for k, v in attrs if k == "href" and v is not None), None)
+            self.replace("")
+            return
+        if self.rebase is None or tag not in {"img", "source"}:
             return
         updated = []
         for name, value in attrs:
@@ -106,46 +147,98 @@ class ImageTagParser(HTMLParser):
             updated.append((name, value))
         if updated == attrs:
             return
-        line, col = self.getpos()
-        start = self.line_offsets[line - 1] + col
         props = "".join(f" {k}" if v is None else f' {k}="{_html.escape(v)}"' for k, v in updated)
-        self.replacements.append((start, start + len(self.get_starttag_text()), f"<{tag}{props}{end}"))
+        self.replace(f"<{tag}{props}{end}")
 
 
-def rebase_images(html: str, base: Path, build: Path) -> tuple[str, dict[str, str]]:
-    """复制本地图到构建目录，并保留相对地址到机检标签的映射。"""
-    base = base.resolve()
-    staged: dict[Path, str] = {}
+def rebase_images(html: str, base: Path, build: Path,
+                  asset_dirs=()) -> tuple[str, dict[str, str], list[str]]:
+    """复制本地图到构建目录。返回 (改写后的 HTML, 构建目录内相对地址到机检标签的映射, 没复制的图片的诊断)。
+
+    只复制解析链接后真实路径在 base 或 asset_dirs 里、后缀和文件头都是图片的文件。没复制的图片改成
+    指向构建目录里不存在的地址，诊断不写源目录以外的路径，也不写地址原文。正文里的 <base href>
+    用来解析图片地址，输出时去掉。
+    """
+    given = [base, *asset_dirs]
+    roots = [Path(d).resolve() for d in given]
+    base = roots[0]
+    # 先按字面路径筛：明显在这些目录以外的（比如别的机器上的共享目录）不去碰文件系统
+    lexical_roots = {*roots, *(Path(os.path.abspath(d)) for d in given)}
+    finder = ImageTagParser(html)
+    finder.feed(html)
+    finder.close()
+    effective = base.as_uri() + "/"
+    if finder.base_href is not None:
+        try:
+            candidate = urljoin(effective, finder.base_href.strip(" \t\r\n\f"))
+            if urlsplit(candidate).scheme in {"file", "http", "https"}:
+                effective = candidate
+        except ValueError:
+            pass  # 写错的基址浏览器也不用
+    staged: dict[object, str] = {}
     labels: dict[str, str] = {}
+    rejected: list[str] = []
+
+    def slot(key, suffix: str = "", label: str | None = None, refused: str | None = None) -> str:
+        """给一张图分一个构建目录内的地址。refused 不为空时这张图不复制，诊断记进 rejected。"""
+        if key not in staged:
+            safe = suffix if re.fullmatch(r"\.[a-z0-9]{1,10}", suffix) else ""
+            relative = staged[key] = f"images/image-{len(staged) + 1}{safe}"
+            labels[relative] = f"{label or relative}：{refused}" if refused else label
+            if refused:
+                rejected.append(labels[relative])
+        return staged[key]
+
+    def stage(source: Path) -> str:
+        if source in staged:
+            return staged[source]
+        suffix = source.suffix.lower()
+        root = next((r for r in roots if source.is_relative_to(r)), None)
+        if root is None:
+            return slot(source, suffix, refused=_OUTSIDE)
+        inside = source.relative_to(root).as_posix()
+        label = inside if root == base else f"{root.name}/{inside}"
+        try:
+            if not source.is_file():
+                return slot(source, suffix, label)  # 文件不在：浏览器加载不到时记为缺图
+            data = source.read_bytes() if suffix in _IMAGE_SUFFIXES else b""
+        except OSError:
+            return slot(source, suffix, label, "读不出来，没复制")
+        if not looks_like_image(data):
+            return slot(source, suffix, label, _NOT_IMAGE)
+        relative = slot(source, suffix, label)
+        target = build / relative
+        target.parent.mkdir(exist_ok=True)
+        target.write_bytes(data)
+        return relative
 
     def rebase(value: str) -> str:
         address = value.strip(" \t\r\n\f")
-        if not address or address.startswith(("#", "//")):
+        if not address or address.startswith("#"):
             return value
-        is_drive_path = _WINDOWS_DRIVE.match(address)
-        parts = urlsplit(address[2:] if is_drive_path else address)
-        if parts.scheme == "file":
-            authority = f"//{parts.netloc}" if parts.netloc and parts.netloc.lower() != "localhost" else ""
-            path = url2pathname(authority + parts.path)
-        elif parts.scheme:
-            return value
-        else:
-            path = (address[:2] if is_drive_path else "") + unquote(parts.path)
-        if not path:
-            return value
-        source = (base / path).resolve()
-        if source not in staged:
-            suffix = source.suffix.lower()
-            safe_suffix = suffix if re.fullmatch(r"\.[a-z0-9]{1,10}", suffix) else ""
-            relative = f"images/image-{len(staged) + 1}{safe_suffix}"
-            staged[source] = relative
-            labels[relative] = (source.relative_to(base).as_posix() if source.is_relative_to(base)
-                                else "本地图片（源目录外）")
-            if suffix in _IMAGE_SUFFIXES and source.is_file():
-                target = build / relative
-                target.parent.mkdir(exist_ok=True)
-                shutil.copyfile(source, target)
-        return urlunsplit(("", "", staged[source], parts.query, parts.fragment))
+        try:
+            if _WINDOWS_DRIVE.match(address):
+                parts = urlsplit(address[2:])
+                path = address[:2] + unquote(parts.path)
+            else:
+                parts = urlsplit(address)
+                if not parts.scheme:  # 相对地址和 //主机/路径 都按生效的基址解析
+                    parts = urlsplit(urljoin(effective, address))
+                    if parts.scheme != "file":
+                        return urlunsplit(parts)  # 远程基址：写成完整地址，不依赖去掉的 <base>
+                elif parts.scheme != "file":
+                    return value
+                path = file_url_path(parts.netloc, parts.path)
+                if path is None:
+                    return slot(("host", address), refused="其他主机上的 file: 图片，不支持")
+            if not path:
+                return value
+            candidate = Path(os.path.abspath(path))
+            if any(candidate.is_relative_to(r) for r in lexical_roots):
+                candidate = candidate.resolve()
+        except (ValueError, OSError):
+            return slot(("bad", address), refused="图片地址格式有误，没处理")
+        return urlunsplit(("", "", stage(candidate), parts.query, parts.fragment))
 
     parser = ImageTagParser(html, rebase)
     parser.feed(html)
@@ -155,7 +248,7 @@ def rebase_images(html: str, base: Path, build: Path) -> tuple[str, dict[str, st
     for start, end, tag in parser.replacements:
         chunks.extend((html[pos:start], tag))
         pos = end
-    return "".join(chunks) + html[pos:], labels
+    return "".join(chunks) + html[pos:], labels, rejected
 
 
 def inject_figs(html: str, figs: dict) -> str:
@@ -293,23 +386,37 @@ def scan_pages(pdf: Path, title: str, date: str, build: Path) -> dict:
 PROBE_JS = r"""
 <style>html,body{width:180mm!important;max-width:180mm!important;margin:0!important;padding:0!important}</style>
 <script>
-window.addEventListener('DOMContentLoaded', async () => {
-    let timer;
-    const deadline = new Promise(resolve => { timer = setTimeout(() => resolve('timeout'), 5000); });
-    const images = Array.from(document.images, async (image, index) => {
-        const finished = new Promise(resolve => {
-            image.addEventListener('load', () => resolve('loaded'), {once: true});
-            image.addEventListener('error', () => resolve('failed'), {once: true});
-            image.loading = 'eager';
-            if (image.complete) resolve(image.naturalWidth ? 'loaded' : 'failed');
-        });
-        const state = await Promise.race([finished, deadline]);
-        if (state === 'loaded') return null;
-        return [index + 1, image.currentSrc || image.src, state];
-    });
-    const missing = (await Promise.all(images)).filter(Boolean);
+(() => {
+const states = new Map();
+const watch = () => Array.from(document.images).filter(image => !states.has(image)).map(image => {
+    states.set(image, new Promise(resolve => {
+        image.addEventListener('load', () => resolve('loaded'), {once: true});
+        image.addEventListener('error', () => resolve('failed'), {once: true});
+        image.loading = 'eager';
+        if (image.complete) resolve(image.naturalWidth ? 'loaded' : 'failed');
+    }));
+}).length;
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+let timer;
+const deadline = new Promise(resolve => { timer = setTimeout(() => resolve('timeout'), 5000); });
+const loaded = new Promise(resolve => window.addEventListener('load', resolve, {once: true}));
+document.addEventListener('DOMContentLoaded', async () => {
+    watch();  // 屏外的懒加载图也立即加载
+    // 等页面 load（有图一直挂着时等到期限），load 回调和随后的定时器还可能插入图片：
+    // 反复枚举 document.images，连续 300 ms 没有新图再判定
+    await Promise.race([loaded, deadline]);
+    for (let quiet = 0, round = 0; quiet < 3 && round < 40; round++) {
+        await sleep(100);
+        quiet = watch() ? 0 : quiet + 1;
+        await Promise.race([Promise.all(states.values()), deadline]);
+    }
+    watch();
+    const images = Array.from(document.images);
+    const results = await Promise.all(images.map(image => Promise.race([states.get(image), deadline])));
+    const missing = images.flatMap((image, index) =>
+        results[index] === 'loaded' ? [] : [[index + 1, image.currentSrc || image.src, results[index]]]);
     clearTimeout(timer);
-    await new Promise(resolve => setTimeout(resolve, 300));
+    await sleep(300);
     const right = document.body.getBoundingClientRect().right + 1;
     const overflowing = [];
     document.querySelectorAll('.katex-display,table,pre,img,svg,.tiles,.ch,.flow,div').forEach(element => {
@@ -323,12 +430,16 @@ window.addEventListener('DOMContentLoaded', async () => {
     result.textContent = JSON.stringify({o: overflowing.slice(0, 10), g: missing.slice(0, 10)});
     document.body.appendChild(result);
 });
+})();
 </script>
 """
 
 
 def missing_image_label(index: int, address: str, page: Path, labels: dict[str, str]) -> str:
-    parts = urlsplit(address)
+    try:
+        parts = urlsplit(address)
+    except ValueError:
+        return f"第 {index} 张图片（地址格式有误）"
     if parts.scheme == "data":
         mime = parts.path.partition(",")[0].partition(";")[0]
         kind = mime if re.fullmatch(r"[\w.+-]+/[\w.+-]+", mime, re.ASCII) else "类型未知"
@@ -336,7 +447,10 @@ def missing_image_label(index: int, address: str, page: Path, labels: dict[str, 
     if parts.scheme in {"https", "http"} or (parts.netloc and not parts.scheme):
         return urlunsplit((parts.scheme, parts.netloc.rsplit("@", 1)[-1], parts.path, "", ""))
     if parts.scheme == "file":
-        path = Path(url2pathname(parts.path))
+        try:
+            path = Path(url2pathname(parts.path))
+        except (ValueError, OSError):
+            return f"第 {index} 张图片"
         if path.is_relative_to(page.parent):
             return labels.get(path.relative_to(page.parent).as_posix(), f"第 {index} 张图片")
     return f"第 {index} 张图片"
@@ -370,15 +484,19 @@ def probe_page(chrome: str, page: Path, profile: Path,
 # ---------- 主流程 ----------
 
 def build(src: Path, out: Path, title: str, date: str, figmod: Path | None = None,
-          chrome: str | None = None, author: str = "") -> dict:
+          chrome: str | None = None, author: str = "", asset_dirs=()) -> dict:
+    """asset_dirs：源文件所在目录以外、允许取图片的素材目录。"""
     from pypdf import PdfReader, PdfWriter
 
+    missing_dirs = [str(d) for d in asset_dirs if not Path(d).is_dir()]
+    if missing_dirs:
+        raise FileNotFoundError(f"--assets 指定的素材目录不存在：{', '.join(missing_dirs)}")
     chrome = find_chrome(chrome)
     body = inject_figs(md_to_html(src.read_text(encoding="utf-8")), load_figs(figmod))
     builds = out.parent / "_build"
     builds.mkdir(parents=True, exist_ok=True)
     bdir = Path(tempfile.mkdtemp(prefix="report-", dir=builds)).resolve()
-    body, labels = rebase_images(body, src.parent, bdir)
+    body, labels, rejected = rebase_images(body, src.parent, bdir, asset_dirs)
 
     shutil.copytree(ASSETS / "katex", bdir / "katex")
     for n in CSS_FILES:
@@ -400,6 +518,8 @@ def build(src: Path, out: Path, title: str, date: str, figmod: Path | None = Non
         with out.open("wb") as f:
             w.write(f)
         overflow, missing = probe_page(chrome, page, profile, labels)
+        # 没复制的图片一律记为缺图，包括浏览器没选中的 srcset 候选
+        missing = rejected + [label for label in missing if label not in rejected]
         result = {"file": out.name, **scan_pages(out, title, date, bdir), "overflow": overflow, "missing_images": missing}
     finally:
         remove_profile(run)
@@ -416,13 +536,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("figmod", type=Path, nargs="?")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--strict", action="store_true")
+    ap.add_argument("--assets", type=Path, action="append", default=[],
+                    help="源文件所在目录以外、允许取图片的素材目录，可以写多次")
     ap.add_argument("--author", default="")
     ap.add_argument("--chrome")
     a = ap.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     res = build(a.src.resolve(), a.out.resolve(), a.title, a.date,
-                a.figmod.resolve() if a.figmod else None, a.chrome, a.author)
+                a.figmod.resolve() if a.figmod else None, a.chrome, a.author, [d.resolve() for d in a.assets])
     print(json.dumps(res, ensure_ascii=False) if a.json else res)
     bad = res["unrendered_math"] or res["blank_pages"] or res["overflow"] or res["missing_images"]
     return 1 if (a.strict and bad) else 0

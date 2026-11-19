@@ -13,10 +13,12 @@ license: MIT
 本 skill 目录下的 `scripts/build_report.py`。需要 pandoc、Chrome（或 Edge、Chromium）、Python 3.11+；Python 依赖写在脚本头里，用 uv 时自动装：
 
 ```bash
-uv run <本 skill 目录>/scripts/build_report.py <正文.md> <输出.pdf> "<页眉标题>" "<日期>" [图模块.py] [--json] [--strict]
+uv run <本 skill 目录>/scripts/build_report.py <正文.md> <输出.pdf> "<页眉标题>" "<日期>" [图模块.py] [--json] [--strict] [--assets <素材目录>]
 ```
 
 没有 uv：`pip install pypdf pypdfium2 "pillow>=13"` 后用 `python` 跑。浏览器找不到时用 `--chrome <路径>` 或环境变量 `KAOYAN_CHROME`。
+
+图片只从正文 `.md` 所在的目录取。放在别处的图，用 `--assets <目录>` 声明那个目录（可以写多次）。不在这些目录里的、不是图片文件的、地址写错的，都不复制进 `_build/`，直接记进 `missing_images`，诊断里不写原路径。
 
 跑完打印一行机检结果：
 
@@ -26,7 +28,7 @@ uv run <本 skill 目录>/scripts/build_report.py <正文.md> <输出.pdf> "<页
 | `unrendered_math` | PDF 文字里残留的 `$` 或 `\命令`，公式没渲染出来 | 空 |
 | `blank_pages` | 空白页 | 空 |
 | `overflow` | 宽过版心被裁掉的公式、表格、图（前 40 字） | 空 |
-| `missing_images` | 没加载出来的图片（相对路径按 Markdown 源文件所在目录解析） | 空 |
+| `missing_images` | 没加载出来或没复制的图片（相对路径按 Markdown 源文件所在目录解析） | 空 |
 | `sparse_pages` | 最后一页以外不到三成满的页 | 可以不管 |
 | `sheet` | 全部页拼成的一张缩略图 | 要看就只看这一张 |
 
