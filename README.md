@@ -230,7 +230,7 @@ uv run pytest -q
 ## 限制
 
 - 没有评测过照片转录的准确率。仓库里只有合成示例，没有真实手写答卷；转录质量取决于你用的模型和照片清晰度，所以流水线要求看不清的地方先问本人。
-- 本地只在 Windows 11 上实际跑过（Python 3.12、pandoc 3.12.1、Chrome）；CI 覆盖 Ubuntu 和 Windows，没有测过 macOS。
+- 本地只在 Windows 11 上实际跑过（Python 3.11、3.12、3.14，pandoc 3.12.1，Chrome）；CI 覆盖 Ubuntu 和 Windows，没有测过 macOS。
 - `kaoyan-daily-pack` 不提供任何讲义或题目，资料要用你自己合法拥有的。
 - `physics-svg-tutor` 的案例库和示范图以光学干涉为主。
 - skill 只规定流程，考试内容以你的教材和考纲为准。
