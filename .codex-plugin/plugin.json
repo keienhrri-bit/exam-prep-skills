@@ -15,6 +15,8 @@
     "developerName": "keienhrri-bit",
     "category": "Education",
     "capabilities": ["Instructions"],
+    "composerIcon": "./assets/icon.svg",
+    "logo": "./assets/icon.svg",
     "defaultPrompt": ["用 kaoyan-setup 帮我建一个备考工作区。"]
   }
 }

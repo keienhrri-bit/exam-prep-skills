@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Codex 插件清单加了图标 `assets/icon.svg`（`composerIcon`、`logo`），插件目录展示用。
+
 ## 0.1.2 (2026-11-19)
 
 - 项目改名为 `exam-prep-skills`（原 `kaoyan-study-skills`），GitHub 旧地址自动跳转。Claude Code 和 Codex 的插件名、marketplace 名一并改为 `exam-prep-skills`：装过旧名的，先移除旧插件和旧 marketplace，再按 README 重新添加。skill 名不变。
