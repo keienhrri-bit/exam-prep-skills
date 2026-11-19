@@ -23,7 +23,7 @@
 
 正文里能用的写法见同目录上一级的 SKILL.md。每次构建在输出 PDF 旁边的 _build/ 中
 独占一个子目录，保留 HTML、资源和缩略图。浏览器配置及中间 PDF 在构建结束时清理。
-本地图片按 Markdown 源文件所在目录解析，HTML 以相对地址引用构建目录内的副本。
+本地图片按 Markdown 源文件所在目录解析，HTML 以相对地址引用构建目录内的副本。只复制常见图片格式（png、jpg、gif、svg、webp 等）；写成图片的其他文件不复制，机检记为缺图。
 """
 from __future__ import annotations
 
@@ -53,6 +53,8 @@ PANDOC_FROM = "markdown+pipe_tables+tex_math_dollars+raw_html+fenced_divs"
 # ---------- 纯函数（有单测） ----------
 
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:[\\/]")
+# 只有这些后缀会被当作图片复制进构建目录。误写成图片的文稿、配置等文件不复制，免得原文落进保留的 _build。
+_IMAGE_SUFFIXES = frozenset({".apng", ".avif", ".bmp", ".gif", ".ico", ".jpeg", ".jpg", ".png", ".svg", ".webp"})
 _SRCSET_SEPARATORS = re.compile(r"[ \t\n\r\f,]*")
 _SRCSET_URL = re.compile(r"[^ \t\n\r\f]+")
 _SRCSET_DESCRIPTORS = re.compile(r"(?:\([^)]*(?:\)|$)|[^,(])*")
@@ -139,7 +141,7 @@ def rebase_images(html: str, base: Path, build: Path) -> tuple[str, dict[str, st
             staged[source] = relative
             labels[relative] = (source.relative_to(base).as_posix() if source.is_relative_to(base)
                                 else "本地图片（源目录外）")
-            if source.is_file():
+            if suffix in _IMAGE_SUFFIXES and source.is_file():
                 target = build / relative
                 target.parent.mkdir(exist_ok=True)
                 shutil.copyfile(source, target)

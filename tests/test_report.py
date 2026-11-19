@@ -70,6 +70,23 @@ def test_rebase_images_leaves_remote_and_data_urls(tmp_path):
     assert br.rebase_images(html, tmp_path / "notes", tmp_path / "out") == (html, {})
 
 
+def test_rebase_images_copies_only_image_files(tmp_path):
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    figure = notes / "fig.png"
+    figure.write_bytes(b"\x89PNG\r\n\x1a\nsynthetic")
+    (tmp_path / "private.txt").write_text("SECRET-BYTES-0042", encoding="utf-8")
+    (notes / "config.json").write_text('{"token": "SECRET-BYTES-0043"}', encoding="utf-8")
+    build = tmp_path / "out"
+    build.mkdir()
+    html = ('<p><img src="fig.png" /><img src="../private.txt" />'
+            '<img srcset="config.json 1x, fig.png 2x" /></p>')
+    out, labels = br.rebase_images(html, notes, build)
+    copied = [p for p in build.rglob("*") if p.is_file()]
+    assert [p.read_bytes() for p in copied] == [figure.read_bytes()]
+    assert "private.txt" not in out and "config.json" not in out
+    assert sorted(labels.values()) == ["config.json", "fig.png", "本地图片（源目录外）"]
+
 def test_chrome_flags_use_given_profile(tmp_path):
     assert f"--user-data-dir={tmp_path / 'p'}" in br.chrome_flags(tmp_path / "p")
 
