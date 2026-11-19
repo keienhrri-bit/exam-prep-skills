@@ -1,10 +1,10 @@
-# kaoyan-study-skills
+# exam-prep-skills
 
-Agent skills for months-long exam prep in Claude Code and Codex: a tutor that makes you try first, and a grading pipeline you can audit.
+Agent skills for months-long exam prep in Claude Code and Codex: a tutor that makes you try first, and a grading pipeline you can audit. Formerly `kaoyan-study-skills`; old links redirect here.
 
 ```
-/plugin marketplace add keienhrri-bit/kaoyan-study-skills
-/plugin install kaoyan-study-skills@kaoyan-study-skills
+/plugin marketplace add keienhrri-bit/exam-prep-skills
+/plugin install exam-prep-skills@exam-prep-skills
 ```
 
 Codex, `gh skill` and skills.sh: see [Install](#install).
@@ -36,24 +36,24 @@ Four subagents ship in `agents/`: `transcriber`, `regrader`, `writer`, `finder`.
 Claude Code (skills and subagents):
 
 ```
-/plugin marketplace add keienhrri-bit/kaoyan-study-skills
-/plugin install kaoyan-study-skills@kaoyan-study-skills
+/plugin marketplace add keienhrri-bit/exam-prep-skills
+/plugin install exam-prep-skills@exam-prep-skills
 ```
 
 Codex:
 
 ```bash
-codex plugin marketplace add keienhrri-bit/kaoyan-study-skills
-codex plugin add kaoyan-study-skills@kaoyan-study-skills
+codex plugin marketplace add keienhrri-bit/exam-prep-skills
+codex plugin add exam-prep-skills@exam-prep-skills
 ```
 
 Skills only, with GitHub CLI (`gh skill` is a preview feature; tested with gh 2.101):
 
 ```bash
-gh skill install keienhrri-bit/kaoyan-study-skills --all --agent claude-code --scope user
+gh skill install keienhrri-bit/exam-prep-skills --all --agent claude-code --scope user
 ```
 
-Or via [skills.sh](https://skills.sh) (not tested by the author): `npx skills add keienhrri-bit/kaoyan-study-skills`. These two routes do not install the subagents; the skills then fall back to a general-purpose subagent with the task brief in the prompt.
+Or via [skills.sh](https://skills.sh) (not tested by the author): `npx skills add keienhrri-bit/exam-prep-skills`. These two routes do not install the subagents; the skills then fall back to a general-purpose subagent with the task brief in the prompt.
 
 `kaoyan-report` needs Python 3.10+, [pandoc](https://pandoc.org/installing.html) and Chrome, Edge or Chromium. KaTeX 0.16.22 is bundled.
 

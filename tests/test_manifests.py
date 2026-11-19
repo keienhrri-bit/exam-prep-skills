@@ -52,7 +52,7 @@ def test_manifests_agree():
     cc = json.loads((ROOT / ".claude-plugin/plugin.json").read_text(encoding="utf-8"))
     mk = json.loads((ROOT / ".claude-plugin/marketplace.json").read_text(encoding="utf-8"))
     cx = json.loads((ROOT / ".codex-plugin/plugin.json").read_text(encoding="utf-8"))
-    assert cc["name"] == mk["plugins"][0]["name"] == cx["name"] == "kaoyan-study-skills"
+    assert cc["name"] == mk["plugins"][0]["name"] == cx["name"] == "exam-prep-skills"
     assert cc["version"] == mk["plugins"][0].get("version") == cx["version"]
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     latest = re.search(r"^## (\d+\.\d+\.\d+)\b", changelog, re.M)

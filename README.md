@@ -1,12 +1,12 @@
-# kaoyan-study-skills
+# exam-prep-skills
 
 给 Claude Code 和 Codex 用的考研备考 skill：讲题先让你自己做，交卷判分有转录、评分点和一次独立复判，计划只给选项。
 
-[English](README.en.md)
+[English](README.en.md) · 原名 `kaoyan-study-skills`，旧链接会自动跳转到这里。
 
 ```
-/plugin marketplace add keienhrri-bit/kaoyan-study-skills
-/plugin install kaoyan-study-skills@kaoyan-study-skills
+/plugin marketplace add keienhrri-bit/exam-prep-skills
+/plugin install exam-prep-skills@exam-prep-skills
 ```
 
 Codex、`gh skill` 和手动安装见 [安装](#安装)。
@@ -51,15 +51,15 @@ Codex、`gh skill` 和手动安装见 [安装](#安装)。
 **Claude Code 插件**（skill 和子代理一起装）：
 
 ```
-/plugin marketplace add keienhrri-bit/kaoyan-study-skills
-/plugin install kaoyan-study-skills@kaoyan-study-skills
+/plugin marketplace add keienhrri-bit/exam-prep-skills
+/plugin install exam-prep-skills@exam-prep-skills
 ```
 
 **Codex 插件**：
 
 ```bash
-codex plugin marketplace add keienhrri-bit/kaoyan-study-skills
-codex plugin add kaoyan-study-skills@kaoyan-study-skills
+codex plugin marketplace add keienhrri-bit/exam-prep-skills
+codex plugin add exam-prep-skills@exam-prep-skills
 ```
 
 `agents/` 里是 Claude Code 的子代理定义。在 Codex 里，转录和复判用 `codex exec` 另起进程跑，`kaoyan-grading` 里写了命令。
@@ -67,13 +67,13 @@ codex plugin add kaoyan-study-skills@kaoyan-study-skills
 **只装 skill**，用 GitHub CLI 的 `gh skill`（预览功能，用 gh 2.101 测过）：
 
 ```bash
-gh skill install keienhrri-bit/kaoyan-study-skills --all --agent claude-code --scope user
+gh skill install keienhrri-bit/exam-prep-skills --all --agent claude-code --scope user
 ```
 
 `--agent` 也可以写 `codex` 等；`--scope project` 装进当前项目。或者用 [skills.sh](https://skills.sh) 的命令行（这条作者没有实测过）：
 
 ```bash
-npx skills add keienhrri-bit/kaoyan-study-skills
+npx skills add keienhrri-bit/exam-prep-skills
 ```
 
 这两种方式不带子代理，各 skill 会退回用内置的通用子代理，把对应的任务书全文放进提示词。

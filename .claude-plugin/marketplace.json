@@ -1,12 +1,12 @@
 {
-  "name": "kaoyan-study-skills",
+  "name": "exam-prep-skills",
   "description": "考研备考 skill：讲题 → 交卷判分 → 阶段复盘 → 调计划 → 记录归档。",
   "owner": {
     "name": "keienhrri-bit"
   },
   "plugins": [
     {
-      "name": "kaoyan-study-skills",
+      "name": "exam-prep-skills",
       "source": "./",
       "version": "0.1.2",
       "description": "Nine skills and four subagents for months-long exam prep: tutor, grading pipeline, checkpoint review, archive, daily pack, PDF reports, retro, physics diagrams."
