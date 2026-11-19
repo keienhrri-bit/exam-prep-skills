@@ -55,7 +55,7 @@ gh skill install keienhrri-bit/exam-prep-skills --all --agent claude-code --scop
 
 Or via [skills.sh](https://skills.sh) (not tested by the author): `npx skills add keienhrri-bit/exam-prep-skills`. These two routes do not install the subagents; the skills then fall back to a general-purpose subagent with the task brief in the prompt.
 
-`kaoyan-report` needs Python 3.10+, [pandoc](https://pandoc.org/installing.html) and Chrome, Edge or Chromium. KaTeX 0.16.22 is bundled.
+`kaoyan-report` needs Python 3.11+, [pandoc](https://pandoc.org/installing.html) and Chrome, Edge or Chromium. KaTeX 0.18.11 is bundled.
 
 ## Rules the skills follow
 

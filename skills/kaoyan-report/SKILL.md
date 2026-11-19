@@ -10,13 +10,13 @@ license: MIT
 
 ## 生成器
 
-本 skill 目录下的 `scripts/build_report.py`。需要 pandoc、Chrome（或 Edge、Chromium）、Python 3.10+；Python 依赖写在脚本头里，用 uv 时自动装：
+本 skill 目录下的 `scripts/build_report.py`。需要 pandoc、Chrome（或 Edge、Chromium）、Python 3.11+；Python 依赖写在脚本头里，用 uv 时自动装：
 
 ```bash
 uv run <本 skill 目录>/scripts/build_report.py <正文.md> <输出.pdf> "<页眉标题>" "<日期>" [图模块.py] [--json] [--strict]
 ```
 
-没有 uv：`pip install pypdf pypdfium2 pillow` 后用 `python` 跑。浏览器找不到时用 `--chrome <路径>` 或环境变量 `KAOYAN_CHROME`。
+没有 uv：`pip install pypdf pypdfium2 "pillow>=13"` 后用 `python` 跑。浏览器找不到时用 `--chrome <路径>` 或环境变量 `KAOYAN_CHROME`。
 
 跑完打印一行机检结果：
 

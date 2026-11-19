@@ -1,6 +1,6 @@
 # /// script
-# requires-python = ">=3.10"
-# dependencies = ["pypdf>=4", "pypdfium2>=4", "pillow>=10"]
+# requires-python = ">=3.11"
+# dependencies = ["pypdf>=4", "pypdfium2>=4", "pillow>=13"]
 # ///
 """Markdown → PDF 报告：pandoc 转 HTML，KaTeX 渲染公式，Chrome（或 Edge、Chromium）无头打印，最后做版面机检。
 

@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.11"
 # dependencies = []
 # ///
 """给“要背的句子”打标：在讲义文字里逐字找得到的标【讲义原话】，找不到的标【转述】。

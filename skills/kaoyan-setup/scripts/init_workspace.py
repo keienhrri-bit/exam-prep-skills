@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.11"
 # dependencies = []
 # ///
 """把备考工作区模板复制到目标目录，并按科目建文件夹。已有的文件一律不覆盖。

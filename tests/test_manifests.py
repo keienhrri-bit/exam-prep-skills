@@ -60,6 +60,42 @@ def test_manifests_agree():
     assert (ROOT / cx["onboardingSkill"]).exists()
 
 
+def _version(text):
+    return tuple(int(part) for part in text.split("."))
+
+
+def test_dependencies_clear_known_advisories():
+    """Pillow 13.0.0 修了一批安全问题，同时不再支持 Python 3.10；随附的 KaTeX 要不低于 0.18.2（GHSA-238p-pmpm-9mq7）。"""
+    scripts = [*SKILLS.rglob("*.py"), *(ROOT / "examples").rglob("*.py"), *(ROOT / "tools").rglob("*.py")]
+    headers = {}
+    for script in scripts:
+        m = re.search(r"^# /// script\n(.*?)^# ///$", script.read_text(encoding="utf-8"), re.M | re.S)
+        if m:
+            headers[script.relative_to(ROOT).as_posix()] = m.group(1)
+    assert len(headers) == 5
+    for rel, header in headers.items():
+        assert '# requires-python = ">=3.11"' in header, rel
+        for floor in re.findall(r'"pillow>=([\d.]+)"', header, re.I):
+            assert _version(floor) >= (13,), rel
+    assert re.search(r"^pillow>=13\b", (ROOT / "requirements-dev.txt").read_text(encoding="utf-8"), re.M)
+    lock = (ROOT / "requirements-lock.txt").read_text(encoding="utf-8")
+    assert "python_full_version < '3.11'" not in lock
+    pins = dict(re.findall(r"^([a-z0-9-]+)==([\d.]+)", lock, re.M))
+    assert _version(pins["pillow"]) >= (13, 0, 0)
+    ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    matrix = re.search(r"^\s+python: \[(.*)\]$", ci, re.M)
+    assert matrix and '"3.11"' in matrix.group(1), "CI 要在最低支持的 Python 上跑"
+
+    katex_js = (SKILLS / "kaoyan-report/assets/katex/katex.min.js").read_text(encoding="utf-8")
+    katex = re.search(r'version:"(\d+\.\d+\.\d+)"', katex_js).group(1)
+    assert _version(katex) >= (0, 18, 2)
+    for doc in ("README.md", "README.en.md", "skills/kaoyan-report/assets/katex/README.txt"):
+        assert f"KaTeX {katex}" in (ROOT / doc).read_text(encoding="utf-8"), doc
+    for doc in ("README.md", "README.en.md", "skills/kaoyan-report/SKILL.md"):
+        text = (ROOT / doc).read_text(encoding="utf-8")
+        assert "3.10" not in text and "3.11" in text, doc
+
+
 @pytest.mark.parametrize("path,pattern", [
     ("kaoyan-report/SKILL.md", r"^## 流程\s*\n(1\. [^\n]*)"),
     ("kaoyan-setup/assets/workspace-template/CLAUDE.md", r"^(- \*\*外援的文字不进成稿\*\*[^\n]*)"),

@@ -82,9 +82,9 @@ npx skills add keienhrri-bit/exam-prep-skills
 
 ### 依赖
 
-- Python 3.10 以上。脚本大多只用标准库；`kaoyan-report` 要 `pypdf`、`pypdfium2`、`pillow`，脚本头里写了依赖，用 [uv](https://docs.astral.sh/uv/) 运行时会自动装。
+- Python 3.11 以上。脚本大多只用标准库；`kaoyan-report` 要 `pypdf`、`pypdfium2`、`pillow`（13 以上），脚本头里写了依赖，用 [uv](https://docs.astral.sh/uv/) 运行时会自动装。
 - `kaoyan-report` 还要 [pandoc](https://pandoc.org/installing.html) 和一个 Chromium 系浏览器（Chrome、Edge 或 Chromium）。找不到浏览器时用 `--chrome <路径>` 或环境变量 `KAOYAN_CHROME` 指定。
-- 公式用 KaTeX 0.16.22，已经随仓库打包，不联网。
+- 公式用 KaTeX 0.18.11，已经随仓库打包，不联网。
 
 ---
 
@@ -209,6 +209,8 @@ uv run skills/kaoyan-report/scripts/build_report.py examples/synthetic-mechanics
   python tools/privacy_scan.py
   ```
 
+  输出只列文件、位置、规则名和次数，不打印命中的内容（私有词表只说第几条，提交作者只给提交号），放在公开 CI 里跑也不会把命中的内容写进日志。
+
 ---
 
 ## 开发和测试
@@ -219,9 +221,9 @@ uv pip install -r requirements-lock.txt
 uv run pytest -q
 ```
 
-`requirements-lock.txt` 是 `requirements-dev.txt` 锁定版本后的结果（`uv pip compile --universal --python-version 3.10 requirements-dev.txt -o requirements-lock.txt`），CI 用它安装。
+`requirements-lock.txt` 是 `requirements-dev.txt` 锁定版本后的结果（`uv pip compile --universal --python-version 3.11 --no-header requirements-dev.txt -o requirements-lock.txt`），CI 用它安装。
 
-测试包括：skill 和插件清单的格式、归档和建工作区脚本、句子打标、示例答案核对、隐私扫描，以及用合成示例真跑一次 PDF 构建（没有 pandoc 或浏览器时跳过）。GitHub Actions 在 Ubuntu 和 Windows 上跑同样的测试和隐私扫描。
+测试包括：skill 和插件清单的格式、依赖版本、归档和建工作区脚本、句子打标、示例答案核对、隐私扫描，以及用合成示例真跑一次 PDF 构建（没有 pandoc 或浏览器时跳过）。GitHub Actions 在 Ubuntu 和 Windows 上，分别用 Python 3.11 和 3.14 跑同样的测试和隐私扫描。
 
 ---
 

@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.11"
 # dependencies = ["sympy>=1.12"]
 # ///
 """用 SymPy 独立重算合成题的三个答案，再确认 solution.md 的 **答** 行写的是同样的数。
