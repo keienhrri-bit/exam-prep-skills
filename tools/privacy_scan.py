@@ -7,6 +7,9 @@
   每行一个正则，用 --extra 传入；默认会读 .work/privacy-extra.txt（.work/ 已在 .gitignore 里）。
 - 文本文件逐行查全部规则，支持 UTF-8 和带 BOM 的 UTF-16。未知扩展名的 UTF-8 文件只有不含 NUL 字节才按文本查。
   PDF、PNG 等二进制文件查原始字节里的路径和邮箱，PDF 另外抽文字和元数据再查一遍。
+  未知扩展名、以 UTF-16 BOM 开头的文件既按 UTF-16 文本查，也查原始字节。
+- 输出只有文件、位置（文本是行号:列号，二进制是字节偏移）、规则名和计数，不打印命中的内容：
+  私有词表只说第几条，提交作者只给提交号。这样在公开 CI 的日志里跑也不会多出一份明文。
 - 有命中时退出码 1。扫描目录不存在、一个文件都没扫到、--extra 指定的词表不存在、
   git 仓库里读不出提交作者时退出码 2：没查完不算通过。
 """
@@ -18,6 +21,7 @@ import os
 import re
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 SKIP_DIRS = {".git", ".work", "_build", "node_modules", ".venv", "__pycache__", ".pytest_cache"}
@@ -54,13 +58,17 @@ BINARY_RULES = [
 
 
 def load_extra(paths: list[Path]) -> list[tuple[str, re.Pattern]]:
+    """私有词表的规则名只写第几条：词本身就是要保密的内容，不能出现在输出里。"""
     rules = []
     for p in paths:
         if p.exists():
             for line in p.read_text(encoding="utf-8").splitlines():
                 if line.strip() and not line.startswith("#"):
-                    rules.append(("私有词表", re.compile(line.strip(), re.I)))
+                    rules.append((f"私有词表第 {len(rules) + 1} 条", re.compile(line.strip(), re.I)))
     return rules
+
+
+UTF16_BOMS = (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)
 
 
 def decode_text(p: Path, data: bytes) -> str | None:
@@ -68,7 +76,7 @@ def decode_text(p: Path, data: bytes) -> str | None:
     suf = p.suffix.lower()
     if suf in BINARY_EXT:
         return None
-    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+    if data.startswith(UTF16_BOMS):
         return data.decode("utf-16", errors="replace")
     if suf in TEXT_EXT:
         return data.decode("utf-8", errors="replace")
@@ -87,24 +95,25 @@ def files(root: Path):
 
 
 def scan_text(rel: str, text: str, rules) -> list[str]:
+    """命中写成“文件:行:列  规则名”，不带命中的内容。"""
     hits = []
     for no, line in enumerate(text.splitlines(), 1):
         for name, rx in rules:
             for m in rx.finditer(line):
                 if name == "邮箱" and ALLOWED_EMAIL.search(m.group(0)):
                     continue
-                hits.append(f"{rel}:{no}  {name}  {m.group(0)[:60]}")
+                hits.append(f"{rel}:{no}:{m.start() + 1}  {name}")
     return hits
 
 
 def scan_binary(rel: str, data: bytes, extra) -> list[str]:
+    """命中写成“文件  规则名  偏移 N”，不带命中的内容。"""
     hits = []
     for name, rx in BINARY_RULES:
         for m in rx.finditer(data):
-            s = m.group(0).decode("latin-1")
-            if name == "二进制里的邮箱" and ALLOWED_EMAIL.search(s):
+            if name == "二进制里的邮箱" and ALLOWED_EMAIL.search(m.group(0).decode("latin-1")):
                 continue
-            hits.append(f"{rel}  {name}  {s[:60]}")
+            hits.append(f"{rel}  {name}  偏移 {m.start()}")
     if rel.lower().endswith(".pdf"):
         try:
             from pypdf import PdfReader
@@ -155,7 +164,7 @@ def git_authors(root: Path) -> tuple[list[str], str | None, bool]:
                 if refs.returncode == 0 and not refs.stdout.strip() and not refs.stderr.strip():
                     return [], "还没有提交，没查提交作者", False
             return [], "Git 无法读取 HEAD，没查提交作者，不算通过。", True
-        r = git("log", "--encoding=UTF-8", "--format=%an <%ae>|%cn <%ce>")
+        r = git("log", "--encoding=UTF-8", "--format=%h%x1f%ae%x1f%ce")
     except FileNotFoundError:
         if not marker:
             return [], not_repo, False
@@ -164,14 +173,15 @@ def git_authors(root: Path) -> tuple[list[str], str | None, bool]:
         return [], "无法运行 Git，没查提交作者，不算通过。", True
     if r.returncode != 0 or not r.stdout.strip():
         return [], "git log 没跑成，提交作者未查完，不算通过。", True
-    out = r.stdout
-    bad = set()
-    for line in out.splitlines():
-        for who in line.split("|"):
-            email = who[who.find("<") + 1:who.rfind(">")]
+    # 只报提交号和次数，不打印名字和邮箱
+    bad: dict[tuple[str, str], list] = {}
+    for line in r.stdout.splitlines():
+        commit, *emails = line.split("\x1f")
+        for role, email in zip(("提交作者", "提交者"), emails):
             if email and not ALLOWED_EMAIL.search(email) and email != "noreply@github.com":
-                bad.add(who)
-    return [f"git 提交作者  {w}" for w in sorted(bad)], None, False
+                bad.setdefault((role, email), [commit, 0])[1] += 1
+    return ([f"git {role}邮箱不是 noreply  最近一次是提交 {commit}，共 {count} 个提交"
+             for (role, _), (commit, count) in bad.items()], None, False)
 
 
 rel_root = Path(".")
@@ -207,19 +217,21 @@ def main(argv: list[str] | None = None) -> int:
             # 第三方原样打包的文件（KaTeX）只查通用规则；私有词表里的数字会在压缩代码里误报
             rules = RULES if rel.startswith(VENDORED) else RULES + extra
             hits += scan_text(rel, text, rules)
-        else:
+        # 未知后缀的文件以 UTF-16 BOM 开头也可能是二进制：错位的 ASCII 解码后会变成乱码，所以原始字节也查
+        if text is None or (p.suffix.lower() not in TEXT_EXT and data.startswith(UTF16_BOMS)):
             hits += scan_binary(rel, data, extra)
             # 压缩过的 PDF、图片、字体里按私有词表搜原始字节只会误报；PDF 已在上面抽文字查过
             if extra and p.suffix.lower() not in SKIP_BINARY_EXTRA_EXT:
                 raw_text = data.decode("latin-1")
-                for _, rx in extra:
-                    if rx.search(raw_text):
-                        hits.append(f"{rel}  私有词表（二进制）  {rx.pattern}")
+                for name, rx in extra:
+                    m = rx.search(raw_text)
+                    if m:
+                        hits.append(f"{rel}  {name}（二进制）  偏移 {m.start()}")
     authors, note, git_failed = git_authors(root)
     hits += authors
     print(f"扫描 {n} 个文件，私有词表 {len(extra)} 条，命中 {len(hits)} 处")
-    for h in hits:
-        print("  " + h)
+    for h, count in Counter(hits).items():
+        print("  " + h + (f"  ×{count}" if count > 1 else ""))
     if note:
         print(f"  说明：{note}")
     if n == 0:

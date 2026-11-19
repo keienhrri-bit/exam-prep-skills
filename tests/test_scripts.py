@@ -296,7 +296,7 @@ def test_privacy_scan_checks_extra_rules_in_executable_bytes(tmp_path, capsys):
     assert scan.main(["--root", str(tmp_path)]) == 1
     out = capsys.readouterr().out
     for name in ("sample.exe", "sample.dll"):
-        assert f"{name}  私有词表（二进制）" in out
+        assert f"{name}  私有词表第 1 条（二进制）" in out
 
 
 @pytest.mark.parametrize("discovery_error", ["missing", "ownership"])
@@ -352,6 +352,45 @@ def test_privacy_scan_reads_bom_utf16_powershell(tmp_path, capsys, byte_order):
     (tmp_path / "deploy.ps1").write_bytes(byte_order + f'$k = "{key}"\r\n'.encode(encoding))
     assert scan.main(["--root", str(tmp_path)]) == 1
     assert "deploy.ps1:1" in capsys.readouterr().out
+
+
+def test_privacy_scan_output_never_contains_matched_values(tmp_path, capsys):
+    """命中只报文件、位置、规则和计数：公开 CI 的日志里不能多一份明文。"""
+    # 拼接写法：让这个测试文件本身不被全仓扫描命中
+    email = "leaky.person" + "@mail.test.cn"
+    token = "ghp_" + "Q" * 30
+    marker = "FixtureOnly" + "PrivateWord"
+    rules = tmp_path / ".work" / "privacy-extra.txt"
+    rules.parent.mkdir()
+    rules.write_text(marker + "\n", encoding="utf-8")
+    (tmp_path / "notes.md").write_text(f"联系 {email}\n令牌 {token} 和 {token}\n{marker}\n", encoding="utf-8")
+    (tmp_path / "blob.exe").write_bytes(b"\x00\xff" + email.encode() + b"\x00" + marker.encode())
+    subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=Leaky Person", "-c", f"user.email={email}",
+                    "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "x"],
+                   check=True, capture_output=True)
+    assert scan.main(["--root", str(tmp_path)]) == 1
+    out = capsys.readouterr().out
+    for secret in (email, token, marker, "Leaky Person", "leaky.person", "mail.test"):
+        assert secret not in out
+    for expected in ("notes.md:1:", "notes.md:2:", "notes.md:3:", "邮箱", "GitHub token", "私有词表第 1 条",
+                     "blob.exe  二进制里的邮箱", "blob.exe  私有词表第 1 条（二进制）", "git 提交作者", "git 提交者"):
+        assert expected in out
+
+
+def test_privacy_scan_checks_raw_bytes_of_unknown_bom_files(tmp_path):
+    """未知后缀的文件即使以 UTF-16 BOM 开头，也要查原始字节：错位的 ASCII 在 UTF-16 解码后会变成乱码。"""
+    path = "C:" + "\\Users\\alice\\Desktop"
+    (tmp_path / "mixed.unknown").write_bytes(
+        b"\xff\xfe" + "表头".encode("utf-16-le") + b"\x00" + path.encode("ascii") + b"\x00")
+    assert scan.main(["--root", str(tmp_path)]) == 1
+
+
+def test_privacy_scan_still_reads_unknown_bom_files_as_utf16_text(tmp_path, capsys):
+    token = "ghp_" + "Z" * 30
+    (tmp_path / "notes.weird").write_bytes(b"\xff\xfe" + f"第一行\r\ntoken {token}\r\n".encode("utf-16-le"))
+    assert scan.main(["--root", str(tmp_path)]) == 1
+    assert "notes.weird:2:7  GitHub token" in capsys.readouterr().out
 
 
 def test_repo_passes_privacy_scan():
